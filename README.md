@@ -41,8 +41,12 @@ fewer tokens, reproducible, and debuggable without the model:
    - `agentic` — the PR branch is checked out and the model reads across the repo
      (`Read`/`Grep`/`Glob`) to verify the diff against the real code. Optionally
      uses review subagents named in `SUBAGENTS`. Reserved for sensitive changes.
-6. **Post** — the model's output follows a strict contract (below); the script
-   wraps it with a hidden marker + bot banner and posts it with `gh pr comment`.
+6. **Validate** — the output is hard-checked against the contract (below) before
+   anything is posted. On a violation it retries once with a corrective hint; if
+   it still doesn't conform, nothing is posted and it's logged. Since no marker
+   is written, the next scheduled run retries automatically (self-healing).
+7. **Post** — the validated output is wrapped with a hidden marker + bot banner
+   and posted with `gh pr comment`.
 
 ### Output contract
 
@@ -55,9 +59,11 @@ VERDICT: green|yellow|red
 ...
 ```
 
-The script parses the verdict (fail-safe default `yellow` if the line is
-missing), wraps the body, and prepends a hidden HTML marker that is invisible in
-the rendered comment but drives **dedup**, **verdict routing**, and **logging**:
+This is **validated before posting**: the first non-blank line must be exactly
+`VERDICT: green|yellow|red` and the body must contain at least one `## ` section.
+Non-conforming output is retried once, then skipped (never posted). The script
+then wraps the body and prepends a hidden HTML marker that is invisible in the
+rendered comment but drives **dedup**, **verdict routing**, and **logging**:
 
 ```
 <!-- auto-review v1 | repo=owner/name | pr=128 | sha=abc123def456 | verdict=yellow | model=claude-haiku-4-5 | mode=digest | domains=deps -->
