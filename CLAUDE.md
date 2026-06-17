@@ -41,11 +41,21 @@ guard) `timeout`/`gtimeout`.
 - **Rotation:** with no `GH_REPO`, each run reviews ONE repo from `repos.conf`
   and advances a persistent round-robin cursor (`$STATE_DIR/cursor`) — this is
   the deliberate stagger so a 15-min timer doesn't hit all repos at once.
+- **Inline comments (agentic only):** the model may append an
+  `@@INLINE@@ … @@END_INLINE@@` JSON array of `{path,line,body}`. Each entry is
+  **anchor-validated against the diff** (`valid_anchors`) before posting —
+  off-diff entries are dropped, never sent, because GitHub 422s the whole review
+  otherwise. Posted as one Reviews-API review with `event:"COMMENT"` (summary as
+  body + inline comments); summary-only mode uses `gh pr comment`.
 
 ## Security posture (these are load-bearing — preserve them)
 
 - **Never add an approve/merge path.** No `gh pr review --approve`, no
-  `gh pr merge`. The verdict drives the comment/labels only.
+  `gh pr merge`. The verdict drives the comment/labels only. Inline reviews use
+  `event:"COMMENT"` only — never `APPROVE`/`REQUEST_CHANGES` (the latter is a
+  blocking gate).
+- **Inline comments are anchor-validated against the diff** before posting; never
+  post model-supplied line numbers unchecked (off-diff lines 422 the review).
 - **Fork PRs are never checked out** — a cross-repository PR is forced to the
   no-tools digest mode. Agentic mode only runs on same-repo (trusted) branches.
 - **Agentic mode is read-only by construction:** allowlist is `Read Grep Glob

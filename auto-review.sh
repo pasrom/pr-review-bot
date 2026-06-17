@@ -145,6 +145,70 @@ run_model() {
   else review_digest "$pr" "$meta"; fi
 }
 
+# ── Inline (line-level) comments — agentic mode only ─────────────────────────
+# The model may append a sentinel-delimited JSON array of {path,line,body} after
+# the summary. We extract it, strip it from the summary, and anchor-validate each
+# entry against the real diff — GitHub rejects the WHOLE review (422) if any
+# comment lands on a line not in the diff, so off-diff comments must be dropped.
+
+extract_inline() { # stdin: raw output → stdout: JSON between the sentinels
+  awk '/^@@INLINE@@/{g=1;next} /^@@END_INLINE@@/{g=0;next} g{print}'
+}
+strip_inline() {   # stdin: body → stdout: body with the sentinel block removed
+  awk '/^@@INLINE@@/{s=1;next} /^@@END_INLINE@@/{s=0;next} !s{print}'
+}
+
+# Emit "path<TAB>line" for every line that can carry a RIGHT-side comment
+# (added or context lines inside a diff hunk). macOS-awk safe (no gawk 3-arg match).
+valid_anchors() { # arg: pr
+  gh pr diff "$1" -R "$GH_REPO" 2>/dev/null | awk '
+    /^diff --git /{inhunk=0; next}
+    /^--- /{inhunk=0; next}
+    /^\+\+\+ /{ f=$0; sub(/^\+\+\+ /,"",f); sub(/^b\//,"",f); inhunk=0; next }
+    /^@@ /{ h=$0; sub(/^@@ -[0-9,]+ \+/,"",h); sub(/[ ,].*/,"",h); newline=h+0; inhunk=1; next }
+    inhunk==1 {
+      c=substr($0,1,1)
+      if (c=="+")      { print f "\t" newline; newline++ }
+      else if (c==" ") { print f "\t" newline; newline++ }
+      else if (c=="-") { }
+      else             { inhunk=0 }
+    }'
+}
+
+# arg: <inline JSON array> ; uses $pr,$GH_REPO ; prints a kept-comments JSON array
+# (each {path,line,side,body}), dropping entries that do not anchor to the diff.
+anchor_filter() {
+  local anchors kept needle p l c
+  anchors="$(mktemp)"; kept="$(mktemp)"
+  valid_anchors "$pr" | sort -u > "$anchors"
+  printf '%s' "$1" | jq -c '.[]?' 2>/dev/null | while IFS= read -r c; do
+    p="$(jq -r '.path // empty' <<<"$c")"
+    l="$(jq -r '.line // empty' <<<"$c")"
+    [[ -n "$p" && "$l" =~ ^[0-9]+$ ]] || continue
+    needle="$(printf '%s\t%s' "$p" "$l")"
+    if grep -qxF "$needle" "$anchors"; then
+      printf '%s\n' "$c" >> "$kept"
+    else
+      log "$GH_REPO #$pr: dropping unanchored inline comment $p:$l"
+    fi
+  done
+  jq -s 'map({path, line, side: "RIGHT", body})' "$kept" 2>/dev/null || echo "[]"
+  rm -f "$anchors" "$kept"
+}
+
+# Post a single COMMENT review (summary body + inline comments) via the Reviews
+# API. event=COMMENT never approves/requests-changes. uses $pr,$GH_REPO,$sha.
+post_inline_review() { # args: <body_text> <kept_json>
+  local payload
+  payload="$(jq -n --arg sha "$sha" --arg body "$1" --argjson cs "$2" \
+    '{commit_id:$sha, event:"COMMENT", body:$body, comments:$cs}')"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf '%s\n' "$payload"
+  else
+    printf '%s' "$payload" | gh api --method POST "repos/$GH_REPO/pulls/$pr/reviews" --input - >/dev/null
+  fi
+}
+
 # ── Review one PR (uses the current $GH_REPO) ────────────────────────────────
 review_pr() {
   local pr="$1"
@@ -169,13 +233,16 @@ review_pr() {
 
   # Dedup: already reviewed this exact head commit? Match the FULL marker prefix
   # (not a loose substring) so a PR author cannot spoof a comment to suppress the
-  # review. If BOT_LOGIN is set, only trust comments authored by the bot account.
+  # review. Scan BOTH issue comments (summary mode) and review summary bodies
+  # (inline mode posts via the Reviews API). If BOT_LOGIN is set, only trust
+  # comments/reviews authored by the bot account.
   local seen
   if [[ -n "${BOT_LOGIN:-}" ]]; then
-    seen="$(gh pr view "$pr" -R "$GH_REPO" --json comments \
-              -q ".comments[] | select(.author.login==\"$BOT_LOGIN\") | .body" 2>/dev/null || true)"
+    seen="$(gh pr view "$pr" -R "$GH_REPO" --json comments,reviews \
+              -q "(.comments[], .reviews[]) | select(.author.login==\"$BOT_LOGIN\") | .body" 2>/dev/null || true)"
   else
-    seen="$(gh pr view "$pr" -R "$GH_REPO" --json comments -q '.comments[].body' 2>/dev/null || true)"
+    seen="$(gh pr view "$pr" -R "$GH_REPO" --json comments,reviews \
+              -q "(.comments[], .reviews[]) | .body" 2>/dev/null || true)"
   fi
   if [[ "$FORCE" != "1" ]] && grep -qF "<!-- $MARKER | repo=$GH_REPO | pr=$pr | sha=$short" <<<"$seen"; then
     log "$GH_REPO #$pr: head $short already reviewed, skip (FORCE=1 to override)"
@@ -213,6 +280,20 @@ review_pr() {
   verdict="$(printf '%s\n' "$raw" | parse_verdict)"; verdict="${verdict:-yellow}"
   body="$(printf '%s\n' "$raw" | parse_body)"
   [[ -n "$body" ]] || body="$raw"   # fail-safe: contract not followed → post raw
+
+  # Inline (line-level) comments — agentic mode only. Extract the sentinel block,
+  # remove it from the summary, and anchor-validate each entry against the diff.
+  local inline_json="[]" ncomments=0
+  if [[ "$MODE" == "agentic" ]]; then
+    local raw_inline
+    raw_inline="$(printf '%s\n' "$raw" | extract_inline)"
+    if [[ -n "$raw_inline" ]]; then
+      body="$(printf '%s\n' "$body" | strip_inline)"
+      inline_json="$(anchor_filter "$raw_inline")"
+      ncomments="$(printf '%s' "$inline_json" | jq 'length' 2>/dev/null || echo 0)"
+    fi
+  fi
+
   # Clamp: a runaway/injected output must not produce a giant comment.
   if [[ "$(printf '%s\n' "$body" | wc -l | tr -d ' ')" -gt 600 ]]; then
     body="$(printf '%s\n' "$body" | head -n 600)"$'\n\n_Output truncated by the reviewer (exceeded 600 lines)._'
@@ -220,20 +301,32 @@ review_pr() {
 
   local comment
   comment="$(
-    printf '<!-- %s | repo=%s | pr=%s | sha=%s | verdict=%s | model=%s | mode=%s | domains=%s -->\n' \
-      "$MARKER" "$GH_REPO" "$pr" "$short" "$verdict" "$MODEL" "$MODE" "$DOMAINS"
+    printf '<!-- %s | repo=%s | pr=%s | sha=%s | verdict=%s | model=%s | mode=%s | domains=%s | inline=%s -->\n' \
+      "$MARKER" "$GH_REPO" "$pr" "$short" "$verdict" "$MODEL" "$MODE" "$DOMAINS" "$ncomments"
     printf '> 🤖 **Automated pre-review** — not a human approval. A human reviewer makes the final call.\n\n'
     printf '%s\n\n' "## $(emoji "$verdict") Verdict: \`$verdict\`"
     printf '%s\n' "$body"
     printf '\n<!-- /auto-review -->\n'
   )"
 
-  if [[ "$DRY_RUN" == "1" ]]; then
-    log "$GH_REPO #$pr: DRY_RUN — would post (verdict=$verdict):"
-    printf '%s\n' "$comment"
+  if [[ "$ncomments" -gt 0 ]]; then
+    # Single COMMENT review: summary as the review body + anchored inline comments.
+    if [[ "$DRY_RUN" == "1" ]]; then
+      log "$GH_REPO #$pr: DRY_RUN — would post review (verdict=$verdict, $ncomments inline comment(s)):"
+      post_inline_review "$comment" "$inline_json"
+    else
+      post_inline_review "$comment" "$inline_json"
+      log "$GH_REPO #$pr: posted pre-review with $ncomments inline comment(s) (verdict=$verdict)"
+    fi
   else
-    printf '%s\n' "$comment" | gh pr comment "$pr" -R "$GH_REPO" --body-file -
-    log "$GH_REPO #$pr: posted pre-review (verdict=$verdict)"
+    # Summary-only issue comment.
+    if [[ "$DRY_RUN" == "1" ]]; then
+      log "$GH_REPO #$pr: DRY_RUN — would post (verdict=$verdict):"
+      printf '%s\n' "$comment"
+    else
+      printf '%s\n' "$comment" | gh pr comment "$pr" -R "$GH_REPO" --body-file -
+      log "$GH_REPO #$pr: posted pre-review (verdict=$verdict)"
+    fi
   fi
 }
 
@@ -311,9 +404,14 @@ review_agentic() {
 
   local sub_line=""
   [[ -n "$SUBAGENTS" ]] && sub_line=$'\n\nIf helpful, use these review subagents and fold their findings in: '"${SUBAGENTS// /, }."
+  # Inline comments: after the markdown summary, the model MAY append a block of
+  # line-level comments, delimited by sentinel lines, as a JSON array. The script
+  # anchor-validates each against the diff before posting (off-diff lines are
+  # dropped), so only comment on lines actually shown in the diff.
+  local inline_instr=$'\n\nAFTER the summary you MAY append line-level comments for specific findings, delimited EXACTLY like this:\n@@INLINE@@\n[{"path":"<file from the diff>","line":<line number on the NEW/RIGHT side, must be an added or context line shown in the diff>,"body":"<the comment>"}]\n@@END_INLINE@@\nRules: valid JSON array; only files and lines present in the diff; at most 10 comments, highest-value only; omit the whole block if you have no precise line-level points. Findings about code not in the diff belong in the summary, not here.'
   local extra="The PR branch is checked out in $repo_dir — you may Read/Grep/Glob across the \
 repository to verify the diff against the actual code and check how changed symbols are used \
-elsewhere. Do not modify any files.$sub_line"
+elsewhere. Do not modify any files.$sub_line$inline_instr"
 
   # Bundle (with the diff) + the cross-read note, via stdin so the variadic
   # --allowedTools cannot swallow a trailing positional prompt.

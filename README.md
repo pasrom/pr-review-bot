@@ -66,12 +66,31 @@ then wraps the body and prepends a hidden HTML marker that is invisible in the
 rendered comment but drives **dedup**, **verdict routing**, and **logging**:
 
 ```
-<!-- auto-review v1 | repo=owner/name | pr=128 | sha=abc123def456 | verdict=yellow | model=claude-haiku-4-5 | mode=digest | domains=deps -->
+<!-- auto-review v1 | repo=owner/name | pr=128 | sha=abc123def456 | verdict=yellow | model=claude-haiku-4-5 | mode=digest | domains=deps | inline=0 -->
 ```
 
 The reviewer persona lives in `reviewer-prompt.md` — it is a generic
 senior-engineer review prompt. Edit it, or point `PROMPT_FILE` at a custom one
 per target if you want repo-specific lenses.
+
+### Line-level (inline) comments
+
+In **agentic mode** (where the model has read the checked-out code) the review
+can include line-level comments, not just a summary. The model appends a
+sentinel-delimited JSON array (`@@INLINE@@ … @@END_INLINE@@`) of
+`{path, line, body}`; the script:
+
+1. **Anchor-validates** every entry against the actual diff — only added/context
+   lines on the new side are commentable. GitHub rejects the *whole* review
+   (422) if any comment is off-diff, so unanchorable entries are **dropped and
+   logged**, not posted.
+2. Posts **one** review via the Reviews API with `event: "COMMENT"` — the
+   summary as the review body plus the anchored inline comments. `COMMENT` never
+   approves or requests changes, so the comment-only guarantee holds.
+
+If no inline comments survive (or in digest mode), it falls back to a single
+summary issue comment. Inline is capped (≤10) and reserved for agentic mode;
+digest mode (bot bumps / docs / general code) stays summary-only.
 
 ## Usage
 
