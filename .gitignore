@@ -1,0 +1,6 @@
+.DS_Store
+*.local
+# Never commit a rendered launchd plist — it holds live tokens in cleartext.
+com.pr-review-bot.plist
+# Your actual target list (copy from repos.conf.example).
+repos.conf

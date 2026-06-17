@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent for the headless PR pre-reviewer (see README.md).
+
+  Setup:
+    1. Copy to ~/Library/LaunchAgents/com.pr-review-bot.plist
+    2. Replace __HOME__ with your home dir and __BOT_DIR__ with this repo's
+       clone path (where auto-review.sh lives). Fill in the auth tokens
+       (see README.md § Auth). List the repos to review in __BOT_DIR__/repos.conf.
+    3. launchctl load -w ~/Library/LaunchAgents/com.pr-review-bot.plist
+
+  Fires every 15 minutes with no args → rotation mode: ONE repo from repos.conf
+  per tick, round-robin, so repos are staggered (repo #1 now, repo #2 in 15 min,
+  …) instead of all hit at once. The script self-locks, so overlapping runs are
+  safe. The per-repo checkout (agentic mode) is self-managed under
+  $HOME/.local/state/pr-review-bot/checkout — do NOT point it at a working copy.
+
+  The script is invoked via its `#!/usr/bin/env bash` shebang using the PATH
+  below; it stays compatible with the macOS system bash (3.2).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.pr-review-bot</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__BOT_DIR__/auto-review.sh</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>900</integer>
+
+  <key>WorkingDirectory</key>
+  <string>__BOT_DIR__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- claude, gh, node/npm, git must all be reachable. Adjust for your setup. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <!-- Optional: pin a single target instead of rotating over repos.conf. -->
+    <!-- <key>GH_REPO</key><string>owner/name</string> -->
+    <!-- Auth: a long-lived Claude token (claude setup-token) OR an API key. -->
+    <key>CLAUDE_CODE_OAUTH_TOKEN</key>
+    <string>__CLAUDE_CODE_OAUTH_TOKEN__</string>
+    <!-- gh auth: a fine-grained token scoped to the target repo (PR read+write). -->
+    <key>GH_TOKEN</key>
+    <string>__GH_TOKEN__</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.local/state/pr-review-bot/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.local/state/pr-review-bot/launchd.err.log</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

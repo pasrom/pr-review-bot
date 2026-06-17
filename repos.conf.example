@@ -1,0 +1,13 @@
+# Repositories the bot reviews, one "owner/name" per line.
+# Copy this to repos.conf and edit. '#' starts a comment; blank lines are ignored.
+#
+# In rotation mode (./auto-review.sh with no GH_REPO) each scheduled run reviews
+# ONE repo from this list, advancing round-robin. With a 15-min timer that means
+# repo #1 now, repo #2 in 15 min, repo #3 in 30 min, … — they are staggered, not
+# all hit at once. Order here is the rotation order.
+#
+# ALL=1 ./auto-review.sh reviews every repo below in a single run (catch-up).
+
+owner/first-repo
+owner/second-repo
+owner/third-repo
