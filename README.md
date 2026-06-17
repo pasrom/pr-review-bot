@@ -146,6 +146,8 @@ cursor wraps over the current length.
 | `CLAUDE_TIMEOUT` | `600` | hard per-call timeout (needs `timeout`/`gtimeout`) |
 | `STATE_DIR` | `$XDG_STATE_HOME/pr-review-bot` | lock + logs + cursor + clones |
 | `BOT_LOGIN` | _(unset)_ | if set, dedup only trusts comments by this account |
+| `ARCHIVE` | `1` | write a per-review debug session file (`0` to disable) |
+| `ARCHIVE_KEEP` | `200` | max archived sessions kept per repo |
 | `DRY_RUN` | `0` | print instead of post |
 | `FORCE` | `0` | ignore dedup |
 
@@ -174,6 +176,32 @@ launchctl load -w ~/Library/LaunchAgents/com.pr-review-bot.plist
 
 Runs every 15 min; the script single-flight-locks so runs never overlap.
 Logs: `$STATE_DIR/auto-review.log` plus the launchd std{out,err} logs.
+
+## Debugging (session archive)
+
+Every review writes a **self-contained markdown record** so you can debug a bad
+or surprising review after the fact — including **failures** (a run skipped for
+non-conforming output is archived too, since that's the main thing you'd debug):
+
+```
+$STATE_DIR/archive/<owner__repo>/pr<n>-<sha>-<timestamp>.md
+```
+
+Each file captures the **decision** (route → mode/model/domains, fork-forced?),
+the **exact input** sent to the model (metadata + CI + diff), the **raw model
+output** (both attempts if it retried), **validation**, **inline-comment
+anchoring** (kept vs dropped), and **what was posted** (or would be, in dry-run).
+
+To debug, hand the file to Claude Code:
+
+```bash
+cc "$(cat ~/.local/state/pr-review-bot/archive/owner__repo/pr123-*.md)"
+# or open it directly in a Claude Code session and ask what went wrong
+```
+
+It contains the PR diff (treat like repo content) but **no tokens**. The newest
+`ARCHIVE_KEEP` sessions per repo are kept; older ones are pruned. `ARCHIVE=0`
+disables it.
 
 ## Guardrails (deliberate)
 

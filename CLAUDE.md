@@ -22,6 +22,10 @@ guard) `timeout`/`gtimeout`.
   gitignored).
 - `com.pr-review-bot.plist.example` — launchd agent template.
 - `README.md` — user-facing setup + usage.
+- (runtime) `$STATE_DIR/archive/<owner__repo>/pr<n>-<sha>-<ts>.md` — per-review
+  debug session: decision, exact model input, raw output (incl. retries),
+  validation, inline anchoring, what was posted. Written for failures too. The
+  thing you hand back to `cc` to debug a review.
 
 ## Design (don't regress these)
 

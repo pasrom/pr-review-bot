@@ -40,8 +40,16 @@
 #   CLAUDE_TIMEOUT   hard per-call timeout seconds (default: 600)
 #   STATE_DIR        lock + logs + cursor + clones (default: $XDG_STATE_HOME/pr-review-bot)
 #   BOT_LOGIN        if set, dedup only trusts comments by this account
+#   ARCHIVE=0        disable per-review debug session files (default: on)
+#   ARCHIVE_KEEP     max archived sessions kept per repo (default: 200)
 #   DRY_RUN=1        do everything except posting; print the comment instead
 #   FORCE=1          re-review even if the current head SHA was already reviewed
+#
+# Each review writes a self-contained markdown session to
+#   $STATE_DIR/archive/<owner__repo>/pr<n>-<sha>-<ts>.md
+# capturing the decision, the exact model input, the raw output (incl. retries),
+# validation, inline-comment anchoring, and what was posted — failures included.
+# Hand that file to Claude Code (`cc`) to debug a review.
 #
 set -euo pipefail
 
@@ -57,6 +65,8 @@ MODEL_MID="${MODEL_MID:-claude-sonnet-4-6}"
 MODEL_DEEP="${MODEL_DEEP:-claude-opus-4-8}"
 MAX_DIFF_LINES="${MAX_DIFF_LINES:-2000}"
 STATE_DIR="${STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pr-review-bot}"
+ARCHIVE="${ARCHIVE:-1}"          # write a per-review debug session file
+ARCHIVE_KEEP="${ARCHIVE_KEEP:-200}"   # max archived sessions kept per repo
 DRY_RUN="${DRY_RUN:-0}"
 FORCE="${FORCE:-0}"
 MARKER="auto-review v1"
@@ -66,6 +76,11 @@ mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR" 2>/dev/null || true
 LOG="$STATE_DIR/auto-review.log"
 CURSOR="$STATE_DIR/cursor"
+ARCHIVE_DIR="$STATE_DIR/archive"
+# The model input + invocation are stashed to files (not vars): run_model runs
+# in a $(...) subshell, so globals set there would be lost — files survive.
+LAST_INPUT_FILE="$STATE_DIR/.last_input"
+LAST_INVOCATION_FILE="$STATE_DIR/.last_invocation"
 log() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" | tee -a "$LOG" >&2; }
 
 # Single-flight lock (macOS has no flock; mkdir is atomic).
@@ -209,6 +224,69 @@ post_inline_review() { # args: <body_text> <kept_json>
   fi
 }
 
+# ── Debug archive ────────────────────────────────────────────────────────────
+# Write a self-contained markdown record of one review (decision, exact model
+# input, raw output incl. retries, validation, inline anchoring, what was
+# posted) so a failed/odd review can be handed to Claude Code to debug. Reads
+# review_pr's dynamically-scoped locals + the LAST_INPUT/LAST_INVOCATION globals.
+# Contains the PR diff (treat like repo content); never contains tokens.
+archive_session() { # arg: outcome string
+  [[ "$ARCHIVE" == "1" ]] || return 0
+  local outcome="$1" dir ts file
+  dir="$ARCHIVE_DIR/${GH_REPO//\//__}"
+  mkdir -p "$dir"
+  ts="$(date '+%Y%m%dT%H%M%S')"
+  file="$dir/pr${pr}-${short}-${ts}.md"
+  {
+    echo "# Review session — $GH_REPO PR #$pr"
+    echo
+    echo "_Self-contained debug record. Hand this file to Claude Code (\`cc\`) to debug the review._"
+    echo
+    echo "## Outcome"
+    echo "- **$outcome**"
+    echo "- time: \`$ts\`  head: \`$sha\`"
+    echo "- decision: author=\`$author\` → mode=\`${MODE:-?}\` model=\`${MODEL:-?}\` domains=\`${DOMAINS:-?}\`"
+    echo "- verdict: \`${verdict:-(not reached)}\`  inline comments: \`${ncomments:-0}\`  retried: \`$([[ "${retried:-0}" == "1" ]] && echo yes || echo no)\`"
+    echo "- invocation: \`$(cat "$LAST_INVOCATION_FILE" 2>/dev/null || echo '?')\`"
+    echo
+    echo "## Input sent to the model"
+    echo
+    cat "$LAST_INPUT_FILE" 2>/dev/null || echo "(input not captured)"
+    echo
+    echo "## Raw model output — attempt 1"
+    echo
+    printf '%s\n' "${raw1:-}"
+    if [[ "${retried:-0}" == "1" ]]; then
+      echo; echo "## Raw model output — attempt 2 (after retry)"; echo
+      printf '%s\n' "${raw:-}"
+    fi
+    if [[ "${ncomments:-0}" -gt 0 ]]; then
+      echo; echo "## Inline comments posted (anchored to the diff)"; echo
+      printf '%s\n' "${inline_json:-[]}"
+    fi
+    if [[ -n "${comment:-}" ]]; then
+      echo; echo "## Posted summary / review body"; echo
+      printf '%s\n' "$comment"
+    fi
+  } > "$file"
+  log "$GH_REPO #$pr: archived session → $file"
+  prune_archive "$dir"
+}
+
+# Keep only the newest $ARCHIVE_KEEP sessions per repo. Filenames are
+# bot-controlled (pr<n>-<sha>-<ts>.md, no spaces), and macOS `find` cannot sort
+# by mtime portably, so `ls -t` is the right tool here.
+prune_archive() { # arg: dir
+  local dir="$1" n f
+  # shellcheck disable=SC2012
+  n="$(ls -1t "$dir" 2>/dev/null | wc -l | tr -d ' ')"
+  (( n > ARCHIVE_KEEP )) || return 0
+  # shellcheck disable=SC2012
+  ls -1t "$dir" 2>/dev/null | tail -n +"$((ARCHIVE_KEEP + 1))" | while IFS= read -r f; do
+    rm -f "$dir/$f"
+  done
+}
+
 # ── Review one PR (uses the current $GH_REPO) ────────────────────────────────
 review_pr() {
   local pr="$1"
@@ -263,14 +341,16 @@ review_pr() {
   # On a violation, retry once with a corrective hint; if it still doesn't
   # conform, post nothing and log — no marker is written, so the next scheduled
   # run retries automatically (self-healing) rather than posting malformed text.
-  local raw
-  raw="$(run_model)"
+  local raw raw1 retried=0
+  raw="$(run_model)"; raw1="$raw"
   if ! printf '%s' "$raw" | is_valid_review; then
     log "$GH_REPO #$pr: output did not match the contract — retrying once"
+    retried=1
     local RETRY_HINT="IMPORTANT: your previous reply was REJECTED because it did not begin with a line exactly matching 'VERDICT: green|yellow|red'. Output ONLY the contract format, starting with that line — no preamble."
     raw="$(run_model)"
     if ! printf '%s' "$raw" | is_valid_review; then
       log "$GH_REPO #$pr: still non-conforming after retry — skipping (no comment posted; will retry next run)"
+      archive_session "skipped: model output did not match the contract after retry"
       return
     fi
     log "$GH_REPO #$pr: retry produced a valid review"
@@ -309,25 +389,31 @@ review_pr() {
     printf '\n<!-- /auto-review -->\n'
   )"
 
+  local outcome
   if [[ "$ncomments" -gt 0 ]]; then
     # Single COMMENT review: summary as the review body + anchored inline comments.
     if [[ "$DRY_RUN" == "1" ]]; then
       log "$GH_REPO #$pr: DRY_RUN — would post review (verdict=$verdict, $ncomments inline comment(s)):"
       post_inline_review "$comment" "$inline_json"
+      outcome="DRY_RUN: review with $ncomments inline comment(s) (verdict=$verdict)"
     else
       post_inline_review "$comment" "$inline_json"
       log "$GH_REPO #$pr: posted pre-review with $ncomments inline comment(s) (verdict=$verdict)"
+      outcome="posted review with $ncomments inline comment(s) (verdict=$verdict)"
     fi
   else
     # Summary-only issue comment.
     if [[ "$DRY_RUN" == "1" ]]; then
       log "$GH_REPO #$pr: DRY_RUN — would post (verdict=$verdict):"
       printf '%s\n' "$comment"
+      outcome="DRY_RUN: summary comment (verdict=$verdict)"
     else
       printf '%s\n' "$comment" | gh pr comment "$pr" -R "$GH_REPO" --body-file -
       log "$GH_REPO #$pr: posted pre-review (verdict=$verdict)"
+      outcome="posted summary comment (verdict=$verdict)"
     fi
   fi
+  archive_session "$outcome"
 }
 
 # ── Bundle builder (deterministic, zero tokens) ──────────────────────────────
@@ -366,10 +452,13 @@ build_bundle() {
 # ── Digest mode: sandboxed claude, bundle via stdin, NO tools ────────────────
 review_digest() {
   local pr="$1" meta="$2"
-  build_bundle "$pr" "$meta" | run_claude -p \
+  build_bundle "$pr" "$meta" > "$LAST_INPUT_FILE"
+  printf 'digest | claude -p --model %s --system-prompt-file %s (no tools)\n' \
+    "$MODEL" "$(basename "$PROMPT_FILE")" > "$LAST_INVOCATION_FILE"
+  run_claude -p \
     --output-format text \
     --model "$MODEL" \
-    --system-prompt-file "$PROMPT_FILE"
+    --system-prompt-file "$PROMPT_FILE" < "$LAST_INPUT_FILE"
 }
 
 # ── Agentic mode: check out the PR for cross-reading ─────────────────────────
@@ -415,12 +504,15 @@ elsewhere. Do not modify any files.$sub_line$inline_instr"
 
   # Bundle (with the diff) + the cross-read note, via stdin so the variadic
   # --allowedTools cannot swallow a trailing positional prompt.
-  { build_bundle "$pr" "$meta"; echo; echo "$extra"; } | run_claude -p \
+  { build_bundle "$pr" "$meta"; echo; echo "$extra"; } > "$LAST_INPUT_FILE"
+  printf 'agentic | claude -p --model %s --add-dir %s --allowedTools Read Grep Glob Task --append-system-prompt-file %s\n' \
+    "$MODEL" "$repo_dir" "$(basename "$PROMPT_FILE")" > "$LAST_INVOCATION_FILE"
+  run_claude -p \
     --output-format text \
     --model "$MODEL" \
     --add-dir "$repo_dir" \
     --allowedTools Read Grep Glob Task \
-    --append-system-prompt-file "$PROMPT_FILE"
+    --append-system-prompt-file "$PROMPT_FILE" < "$LAST_INPUT_FILE"
 }
 
 # ── Target selection ─────────────────────────────────────────────────────────
