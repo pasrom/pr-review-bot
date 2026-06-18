@@ -138,25 +138,32 @@ route() {
 
 # ── Verdict / body parsing ───────────────────────────────────────────────────
 parse_verdict() { # stdin: raw claude output → stdout: green|yellow|red
-  grep -m1 -iE '^VERDICT:' | sed -E 's/^[Vv][Ee][Rr][Dd][Ii][Cc][Tt]:[[:space:]]*//' \
-    | tr '[:upper:]' '[:lower:]' | grep -oE 'green|yellow|red' | head -1
+  # Pick the FIRST line matching the verdict contract — the SAME regex as
+  # is_valid_review and parse_body, so all three agree on which line is the
+  # verdict (a loose `VERDICT: not red…` preamble line is skipped, not picked).
+  grep -m1 -iE '^VERDICT:[[:space:]]*(green|yellow|red)([[:space:]].*)?$' \
+    | grep -oiE 'green|yellow|red' | head -1 | tr '[:upper:]' '[:lower:]'
 }
 parse_body() { # stdin: raw claude output → stdout: body after the VERDICT line
-  awk 'p{print} toupper($0) ~ /^VERDICT:/{p=1}' | sed -e '/./,$!d'
+  # Cut at the SAME verdict line is_valid_review/parse_verdict use (first line
+  # whose first token after VERDICT: is the colour), so the posted body matches
+  # the validated and extracted verdict.
+  awk 'p{print} toupper($0) ~ /^VERDICT:[ \t]*(GREEN|YELLOW|RED)([ \t].*)?$/{p=1}' | sed -e '/./,$!d'
 }
 emoji() { case "$1" in green) echo "🟢";; red) echo "🔴";; *) echo "🟡";; esac; }
 
-# Validate the output contract BEFORE posting: the output must contain a
-# `VERDICT: green|yellow|red` line and at least one `## ` section heading.
-# The VERDICT need not be the first line — in agentic (tool-using) mode the
-# model routinely prefixes a short verification preamble, which parse_verdict and
-# parse_body already discard. Requiring position 1 rejected otherwise-valid
-# reviews, and since no marker is posted the PR then looped (re-reviewed every
-# run). Returns 0 iff the model honoured the contract. (stdin)
+# Validate the output contract BEFORE posting: the output must contain a verdict
+# line (`VERDICT: <colour>`, optionally followed by prose) and at least one `## `
+# section heading. The VERDICT need not be the first line — in agentic mode the
+# model prefixes a verification preamble, which parse_verdict/parse_body discard.
+# This regex MUST stay identical to the one in parse_verdict/parse_body so all
+# three agree on which line is the verdict — otherwise a loose preamble `VERDICT:`
+# line could drive the posted verdict while a later clean line satisfied
+# validation. Returns 0 iff the model honoured the contract. (stdin)
 is_valid_review() {
   local out
   out="$(cat)"
-  printf '%s\n' "$out" | grep -qiE '^VERDICT:[[:space:]]*(green|yellow|red)[[:space:]]*$' || return 1
+  printf '%s\n' "$out" | grep -qiE '^VERDICT:[[:space:]]*(green|yellow|red)([[:space:]].*)?$' || return 1
   printf '%s\n' "$out" | grep -qE '^##[[:space:]]' || return 1
   return 0
 }
@@ -536,6 +543,7 @@ load_repos() {
   local line repo filter
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%%#*}"                  # drop inline comments
+    line="${line//$'\r'/}"              # tolerate CRLF-edited repos.conf (the old tr -d stripped \r)
     read -r repo filter _ <<<"$line"    # split: "owner/name [filter]" (extra tokens ignored)
     [[ -n "$repo" ]] && { REPOS+=("$repo"); REPO_FILTERS+=("$filter"); }
   done < "$REPOS_FILE"
