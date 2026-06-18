@@ -1,5 +1,11 @@
-# Repositories the bot reviews, one "owner/name" per line.
+# Repositories the bot reviews, one line per repo:  owner/name  [reviewer-filter]
 # Copy this to repos.conf and edit. '#' starts a comment; blank lines are ignored.
+#
+# Optional 2nd column = which PRs to review in that repo (overrides the global
+# REVIEW_REQUESTED env default):
+#   <login> / @me   only PRs that request this account as a reviewer (opt-in)
+#   *               every open PR
+#   (omitted)       fall back to the global REVIEW_REQUESTED default
 #
 # In rotation mode (./auto-review.sh with no GH_REPO) each scheduled run reviews
 # ONE repo from this list, advancing round-robin. With a 15-min timer that means
@@ -8,6 +14,6 @@
 #
 # ALL=1 ./auto-review.sh reviews every repo below in a single run (catch-up).
 
-owner/first-repo
-owner/second-repo
-owner/third-repo
+owner/first-repo        @me     # only PRs that request the bot as reviewer
+owner/second-repo       *       # every open PR
+owner/third-repo                # uses the global REVIEW_REQUESTED default

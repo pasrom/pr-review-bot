@@ -44,8 +44,9 @@
 #   ARCHIVE_KEEP     max archived sessions kept per repo (default: 200)
 #   DRY_RUN=1        do everything except posting; print the comment instead
 #   FORCE=1          re-review even if the current head SHA was already reviewed
-#   REVIEW_REQUESTED if set (e.g. @me or a login), only review open PRs that
-#                    request this account as a reviewer (opt-in mode)
+#   REVIEW_REQUESTED global default opt-in login (e.g. @me, the token account):
+#                    only review open PRs that request it. A repos.conf 2nd
+#                    column overrides this per repo ('*' = review every open PR)
 #
 # Each review writes a self-contained markdown session to
 #   $STATE_DIR/archive/<owner__repo>/pr<n>-<sha>-<ts>.md
@@ -71,9 +72,10 @@ ARCHIVE="${ARCHIVE:-1}"          # write a per-review debug session file
 ARCHIVE_KEEP="${ARCHIVE_KEEP:-200}"   # max archived sessions kept per repo
 DRY_RUN="${DRY_RUN:-0}"
 FORCE="${FORCE:-0}"
-REVIEW_REQUESTED="${REVIEW_REQUESTED:-}"  # opt-in: only PRs requesting this login (e.g. @me)
+REVIEW_REQUESTED="${REVIEW_REQUESTED:-}"  # global default opt-in login (e.g. @me); a repos.conf 2nd column overrides it per repo
 MARKER="auto-review v1"
 REPOS=()
+REPO_FILTERS=()   # parallel to REPOS: per-repo review-requested override from repos.conf col 2
 
 mkdir -p "$STATE_DIR"
 chmod 700 "$STATE_DIR" 2>/dev/null || true
@@ -529,17 +531,29 @@ elsewhere. Do not modify any files.$sub_line$inline_instr"
 # ── Target selection ─────────────────────────────────────────────────────────
 # Read REPOS_FILE → REPOS[] (one owner/name per line; '#' comments, blanks ok).
 load_repos() {
-  REPOS=()
+  REPOS=(); REPO_FILTERS=()
   [[ -f "$REPOS_FILE" ]] || return 0
-  local line
+  local line repo filter
   while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line%%#*}"
-    line="$(printf '%s' "$line" | tr -d '[:space:]')"
-    [[ -n "$line" ]] && REPOS+=("$line")
+    line="${line%%#*}"                  # drop inline comments
+    read -r repo filter _ <<<"$line"    # split: "owner/name [filter]" (extra tokens ignored)
+    [[ -n "$repo" ]] && { REPOS+=("$repo"); REPO_FILTERS+=("$filter"); }
   done < "$REPOS_FILE"
   # The trailing `read` returns non-zero at EOF; without this the function would
   # inherit that status and `set -e` would kill the (rotation) caller mid-run.
   return 0
+}
+
+# Resolve a repo's effective review-requested filter from its repos.conf column:
+#   (absent)  -> the global $REVIEW_REQUESTED default
+#   * | all   -> review every open PR (no opt-in)
+#   <login>   -> opt-in to that login (e.g. @me)
+effective_filter() {
+  case "$1" in
+    '')      printf '%s' "$REVIEW_REQUESTED" ;;
+    '*'|all) printf '%s' '' ;;
+    *)       printf '%s' "$1" ;;
+  esac
 }
 
 # Round-robin cursor: print this run's index in [0,n), advance the stored value.
@@ -555,16 +569,17 @@ next_cursor() {
 # Review every open PR of one repo (Dependabot first).
 poll_repo() {
   GH_REPO="$1"
+  local filter="${2:-}"
   local prs=() n listmsg
-  # Opt-in mode (REVIEW_REQUESTED set): only PRs that explicitly request this
-  # account as a reviewer — GitHub's search resolves @me to the token account.
-  # Otherwise: every open PR. Drafts are dropped later in review_pr.
-  if [[ -n "$REVIEW_REQUESTED" ]]; then
+  # Opt-in mode (filter set): only PRs that explicitly request this account as a
+  # reviewer — GitHub's search resolves @me to the token account. Otherwise:
+  # every open PR. Drafts are dropped later in review_pr.
+  if [[ -n "$filter" ]]; then
     while IFS= read -r n; do [[ -n "$n" ]] && prs+=("$n"); done < <(
-      gh pr list -R "$GH_REPO" --search "state:open review-requested:$REVIEW_REQUESTED" \
+      gh pr list -R "$GH_REPO" --search "state:open review-requested:$filter" \
         --json number,author -q 'sort_by(.author.login != "dependabot[bot]") | .[].number' 2>/dev/null
     )
-    listmsg="requested for $REVIEW_REQUESTED"
+    listmsg="requested for $filter"
   else
     while IFS= read -r n; do [[ -n "$n" ]] && prs+=("$n"); done < <(
       gh pr list -R "$GH_REPO" --state open \
@@ -588,7 +603,7 @@ main() {
       local pr
       for pr in "$@"; do review_pr "$pr" || log "$GH_REPO #$pr: review failed (continuing)"; done
     else
-      poll_repo "$GH_REPO"
+      poll_repo "$GH_REPO" "$REVIEW_REQUESTED"
     fi
     return
   fi
@@ -602,8 +617,10 @@ main() {
   fi
   if [[ "$ALL" == "1" ]]; then
     log "ALL mode: ${#REPOS[@]} repos this run"
-    local r
-    for r in "${REPOS[@]}"; do poll_repo "$r"; done
+    local i
+    for ((i = 0; i < ${#REPOS[@]}; i++)); do
+      poll_repo "${REPOS[$i]}" "$(effective_filter "${REPO_FILTERS[$i]}")"
+    done
     return
   fi
   # One repo per run, round-robin via the persistent cursor — this is the
@@ -611,7 +628,7 @@ main() {
   local n="${#REPOS[@]}" idx
   idx="$(next_cursor "$n")"
   log "rotation: slot $((idx + 1))/$n → ${REPOS[$idx]}"
-  poll_repo "${REPOS[$idx]}"
+  poll_repo "${REPOS[$idx]}" "$(effective_filter "${REPO_FILTERS[$idx]}")"
 }
 
 # Run main only when executed directly (sourcing exposes functions for tests).
