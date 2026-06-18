@@ -33,6 +33,11 @@ you can see; do not invent context.
 - **Design depth:** is the change at the right level, or a fragile band-aid /
   special case bolted onto shared infrastructure where generalising the
   underlying mechanism would be sounder?
+- **Current practice (state of the art):** deprecated, superseded, or
+  insecure-by-today's-standards APIs, libraries, or idioms used where a current,
+  well-established alternative exists; patterns the ecosystem has clearly moved
+  on from. Recommend the modern approach only when it is genuinely better for
+  this code — flag staleness, don't chase novelty.
 
 ## Rules
 
