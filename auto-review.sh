@@ -141,14 +141,17 @@ parse_body() { # stdin: raw claude output → stdout: body after the VERDICT lin
 }
 emoji() { case "$1" in green) echo "🟢";; red) echo "🔴";; *) echo "🟡";; esac; }
 
-# Validate the output contract BEFORE posting: the first non-blank line must be
-# exactly `VERDICT: green|yellow|red`, and the body must contain at least one
-# `## ` section heading. Returns 0 iff the model honoured the contract. (stdin)
+# Validate the output contract BEFORE posting: the output must contain a
+# `VERDICT: green|yellow|red` line and at least one `## ` section heading.
+# The VERDICT need not be the first line — in agentic (tool-using) mode the
+# model routinely prefixes a short verification preamble, which parse_verdict and
+# parse_body already discard. Requiring position 1 rejected otherwise-valid
+# reviews, and since no marker is posted the PR then looped (re-reviewed every
+# run). Returns 0 iff the model honoured the contract. (stdin)
 is_valid_review() {
-  local out first
+  local out
   out="$(cat)"
-  first="$(printf '%s\n' "$out" | sed -n '/[^[:space:]]/{p;q;}')"
-  printf '%s' "$first" | grep -qiE '^VERDICT:[[:space:]]*(green|yellow|red)[[:space:]]*$' || return 1
+  printf '%s\n' "$out" | grep -qiE '^VERDICT:[[:space:]]*(green|yellow|red)[[:space:]]*$' || return 1
   printf '%s\n' "$out" | grep -qE '^##[[:space:]]' || return 1
   return 0
 }
@@ -346,7 +349,7 @@ review_pr() {
   if ! printf '%s' "$raw" | is_valid_review; then
     log "$GH_REPO #$pr: output did not match the contract — retrying once"
     retried=1
-    local RETRY_HINT="IMPORTANT: your previous reply was REJECTED because it did not begin with a line exactly matching 'VERDICT: green|yellow|red'. Output ONLY the contract format, starting with that line — no preamble."
+    local RETRY_HINT="IMPORTANT: your previous reply was REJECTED by an automated check. It MUST contain a line exactly matching 'VERDICT: green|yellow|red' (on its own line) and at least one '## ' Markdown section heading. Re-send the review in the required contract format."
     raw="$(run_model)"
     if ! printf '%s' "$raw" | is_valid_review; then
       log "$GH_REPO #$pr: still non-conforming after retry — skipping (no comment posted; will retry next run)"
