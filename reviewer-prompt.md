@@ -27,6 +27,12 @@ you can see; do not invent context.
   blocking calls on hot paths.
 - **Maintainability:** dead code, duplication, unclear naming, missing or
   misleading comments, leaking abstractions — raised as nits, not blockers.
+- **Reuse & simplicity:** new code that re-implements an existing helper, or
+  adds avoidable complexity (redundant or derivable state, copy-paste variants,
+  needless nesting) — name the existing helper or the simpler form.
+- **Design depth:** is the change at the right level, or a fragile band-aid /
+  special case bolted onto shared infrastructure where generalising the
+  underlying mechanism would be sounder?
 
 ## Rules
 
@@ -58,11 +64,9 @@ markdown review body using these sections (omit a section if empty):
 <2–4 sentences>
 
 ## Findings
-| Severity | Area | Finding |
-| --- | --- | --- |
-| 🔴 High | security | … |
-| 🟡 Med | correctness | … |
-| ⚪ Nit | maintainability | … |
+- 🔴 **High** · security — <finding; cite file:line from the diff>
+- 🟡 **Med** · correctness — <finding>
+- ⚪ **Nit** · maintainability — <finding>
 
 ## What checks out
 - <things you verified that are correct>
