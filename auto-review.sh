@@ -489,7 +489,12 @@ review_agentic() {
   fi
 
   if ! ( cd "$repo_dir"
-         git fetch --quiet origin \
+         # Make plain git operations token-aware by bridging credentials through
+         # gh (works whether gh is keyring- or GH_TOKEN-authed). Without this,
+         # `git fetch` on a non-interactive box fails with "could not read
+         # Username". Scoped to this disposable clone; no token written to disk.
+         git config --local --replace-all 'credential.https://github.com.helper' '!gh auth git-credential' \
+         && git fetch --quiet origin \
          && gh pr checkout "$pr" -R "$GH_REPO" --force >/dev/null 2>&1 \
          && [[ "$(git rev-parse HEAD)" == "$sha" ]] ); then
     log "$GH_REPO #$pr: checkout failed or HEAD != $sha — falling back to digest mode"
