@@ -499,10 +499,11 @@ review_agentic() {
 
   if ! ( cd "$repo_dir"
          # Make plain git operations token-aware by bridging credentials through
-         # gh (works whether gh is keyring- or GH_TOKEN-authed). Without this,
-         # `git fetch` on a non-interactive box fails with "could not read
-         # Username". Scoped to this disposable clone; no token written to disk.
-         git config --local --replace-all 'credential.https://github.com.helper' '!gh auth git-credential' \
+         # gh (works whether gh is keyring- or GH_TOKEN-authed, on any host gh
+         # knows — not only github.com). Without this, `git fetch` on a
+         # non-interactive box fails with "could not read Username". Scoped to
+         # this disposable clone; no token written to disk.
+         git config --local --replace-all credential.helper '!gh auth git-credential' \
          && git fetch --quiet origin \
          && gh pr checkout "$pr" -R "$GH_REPO" --force >/dev/null 2>&1 \
          && [[ "$(git rev-parse HEAD)" == "$sha" ]] ); then
@@ -578,23 +579,19 @@ next_cursor() {
 poll_repo() {
   GH_REPO="$1"
   local filter="${2:-}"
-  local prs=() n listmsg
+  local prs=() n listmsg sel=()
   # Opt-in mode (filter set): only PRs that explicitly request this account as a
   # reviewer — GitHub's search resolves @me to the token account. Otherwise:
   # every open PR. Drafts are dropped later in review_pr.
   if [[ -n "$filter" ]]; then
-    while IFS= read -r n; do [[ -n "$n" ]] && prs+=("$n"); done < <(
-      gh pr list -R "$GH_REPO" --search "state:open review-requested:$filter" \
-        --json number,author -q 'sort_by(.author.login != "dependabot[bot]") | .[].number' 2>/dev/null
-    )
-    listmsg="requested for $filter"
+    sel=(--search "state:open review-requested:$filter"); listmsg="requested for $filter"
   else
-    while IFS= read -r n; do [[ -n "$n" ]] && prs+=("$n"); done < <(
-      gh pr list -R "$GH_REPO" --state open \
-        --json number,author -q 'sort_by(.author.login != "dependabot[bot]") | .[].number' 2>/dev/null
-    )
-    listmsg="all open"
+    sel=(--state open);                                   listmsg="all open"
   fi
+  while IFS= read -r n; do [[ -n "$n" ]] && prs+=("$n"); done < <(
+    gh pr list -R "$GH_REPO" "${sel[@]}" \
+      --json number,author -q 'sort_by(.author.login != "dependabot[bot]") | .[].number' 2>/dev/null
+  )
   if (( ${#prs[@]} == 0 )); then log "$GH_REPO: no PRs to review ($listmsg)"; return; fi
   log "$GH_REPO: reviewing PRs ${prs[*]} ($listmsg)"
   local pr
