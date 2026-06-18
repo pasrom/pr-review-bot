@@ -138,6 +138,7 @@ cursor wraps over the current length.
 | `GH_REPO` | _(unset)_ | explicit single target `owner/name` (overrides rotation) |
 | `REPOS_FILE` | `./repos.conf` | rotation list, one `owner/name` per line |
 | `ALL` | `0` | rotation mode: review every listed repo this run |
+| `REVIEW_REQUESTED` | _(unset)_ | opt-in: only review open PRs that request this login (e.g. `@me` = the token account); unset reviews every open PR |
 | `SUBAGENTS` | _(unset)_ | space-separated review subagent names for agentic mode |
 | `PROMPT_FILE` | `./reviewer-prompt.md` | reviewer persona (override per target) |
 | `REPO_DIR` | `$STATE_DIR/checkout/<owner__repo>` | self-managed disposable clone (agentic) |

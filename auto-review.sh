@@ -44,6 +44,8 @@
 #   ARCHIVE_KEEP     max archived sessions kept per repo (default: 200)
 #   DRY_RUN=1        do everything except posting; print the comment instead
 #   FORCE=1          re-review even if the current head SHA was already reviewed
+#   REVIEW_REQUESTED if set (e.g. @me or a login), only review open PRs that
+#                    request this account as a reviewer (opt-in mode)
 #
 # Each review writes a self-contained markdown session to
 #   $STATE_DIR/archive/<owner__repo>/pr<n>-<sha>-<ts>.md
@@ -69,6 +71,7 @@ ARCHIVE="${ARCHIVE:-1}"          # write a per-review debug session file
 ARCHIVE_KEEP="${ARCHIVE_KEEP:-200}"   # max archived sessions kept per repo
 DRY_RUN="${DRY_RUN:-0}"
 FORCE="${FORCE:-0}"
+REVIEW_REQUESTED="${REVIEW_REQUESTED:-}"  # opt-in: only PRs requesting this login (e.g. @me)
 MARKER="auto-review v1"
 REPOS=()
 
@@ -544,13 +547,25 @@ next_cursor() {
 # Review every open PR of one repo (Dependabot first).
 poll_repo() {
   GH_REPO="$1"
-  local prs=() n
-  while IFS= read -r n; do [[ -n "$n" ]] && prs+=("$n"); done < <(
-    gh pr list -R "$GH_REPO" --state open --json number,author \
-      -q 'sort_by(.author.login != "dependabot[bot]") | .[].number' 2>/dev/null
-  )
-  if (( ${#prs[@]} == 0 )); then log "$GH_REPO: no open PRs"; return; fi
-  log "$GH_REPO: reviewing PRs ${prs[*]}"
+  local prs=() n listmsg
+  # Opt-in mode (REVIEW_REQUESTED set): only PRs that explicitly request this
+  # account as a reviewer — GitHub's search resolves @me to the token account.
+  # Otherwise: every open PR. Drafts are dropped later in review_pr.
+  if [[ -n "$REVIEW_REQUESTED" ]]; then
+    while IFS= read -r n; do [[ -n "$n" ]] && prs+=("$n"); done < <(
+      gh pr list -R "$GH_REPO" --search "state:open review-requested:$REVIEW_REQUESTED" \
+        --json number,author -q 'sort_by(.author.login != "dependabot[bot]") | .[].number' 2>/dev/null
+    )
+    listmsg="requested for $REVIEW_REQUESTED"
+  else
+    while IFS= read -r n; do [[ -n "$n" ]] && prs+=("$n"); done < <(
+      gh pr list -R "$GH_REPO" --state open \
+        --json number,author -q 'sort_by(.author.login != "dependabot[bot]") | .[].number' 2>/dev/null
+    )
+    listmsg="all open"
+  fi
+  if (( ${#prs[@]} == 0 )); then log "$GH_REPO: no PRs to review ($listmsg)"; return; fi
+  log "$GH_REPO: reviewing PRs ${prs[*]} ($listmsg)"
   local pr
   for pr in "${prs[@]}"; do
     review_pr "$pr" || log "$GH_REPO #$pr: review failed (continuing)"
