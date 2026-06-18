@@ -537,6 +537,9 @@ load_repos() {
     line="$(printf '%s' "$line" | tr -d '[:space:]')"
     [[ -n "$line" ]] && REPOS+=("$line")
   done < "$REPOS_FILE"
+  # The trailing `read` returns non-zero at EOF; without this the function would
+  # inherit that status and `set -e` would kill the (rotation) caller mid-run.
+  return 0
 }
 
 # Round-robin cursor: print this run's index in [0,n), advance the stored value.
