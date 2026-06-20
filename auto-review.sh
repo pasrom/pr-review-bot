@@ -77,8 +77,6 @@ MARKER="auto-review v1"
 REPOS=()
 REPO_FILTERS=()   # parallel to REPOS: per-repo review-requested override from repos.conf col 2
 
-mkdir -p "$STATE_DIR"
-chmod 700 "$STATE_DIR" 2>/dev/null || true
 LOG="$STATE_DIR/auto-review.log"
 CURSOR="$STATE_DIR/cursor"
 ARCHIVE_DIR="$STATE_DIR/archive"
@@ -89,25 +87,35 @@ LAST_INVOCATION_FILE="$STATE_DIR/.last_invocation"
 LAST_USAGE_FILE="$STATE_DIR/.last_usage"   # token usage + cost, one line per model call (reset per PR)
 log() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" | tee -a "$LOG" >&2; }
 
-# Single-flight lock (macOS has no flock; mkdir is atomic).
+# Single-flight lock path (macOS has no flock; mkdir is atomic). Acquired in
+# preflight() when run as a program, so sourcing the script for tests is side-effect-free.
 LOCK="$STATE_DIR/.lock"
-if ! mkdir "$LOCK" 2>/dev/null; then
-  log "another run holds the lock ($LOCK); exiting"
-  exit 0
-fi
-trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
-
-command -v claude >/dev/null || { log "FATAL: claude not on PATH"; exit 1; }
-command -v gh >/dev/null     || { log "FATAL: gh not on PATH"; exit 1; }
-command -v jq >/dev/null      || { log "FATAL: jq not on PATH"; exit 1; }
 
 # Wrap claude in a hard timeout so an unattended (launchd) run can never hang.
 TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
 CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-600}"
-[[ -n "$TIMEOUT_BIN" ]] || log "WARN: no timeout/gtimeout on PATH — CLAUDE_TIMEOUT is INACTIVE; a hung claude call will not be killed (brew install coreutils)"
 run_claude() {
   if [[ -n "$TIMEOUT_BIN" ]]; then "$TIMEOUT_BIN" "$CLAUDE_TIMEOUT" claude "$@"
   else claude "$@"; fi
+}
+
+# Runtime preconditions — run only when executed as a program (not when sourced
+# for tests): create the state dir, acquire the single-flight lock, verify the
+# required tools, and warn if the hard-timeout guard is inactive. Order matches
+# the original top-level sequence (lock before tool checks).
+preflight() {
+  mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR" 2>/dev/null || true
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    log "another run holds the lock ($LOCK); exiting"
+    exit 0
+  fi
+  trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
+  local t
+  for t in claude gh jq; do
+    command -v "$t" >/dev/null || { log "FATAL: $t not on PATH"; exit 1; }
+  done
+  [[ -n "$TIMEOUT_BIN" ]] || log "WARN: no timeout/gtimeout on PATH — CLAUDE_TIMEOUT is INACTIVE; a hung claude call will not be killed (brew install coreutils)"
 }
 
 # Run claude (JSON output) reading the model input from $LAST_INPUT_FILE, record
@@ -690,7 +698,9 @@ main() {
   poll_repo "${REPOS[$idx]}" "$(effective_filter "${REPO_FILTERS[$idx]}")"
 }
 
-# Run main only when executed directly (sourcing exposes functions for tests).
+# Run main only when executed directly. Sourcing exposes the functions for tests
+# without running preflight (no lock, no tool checks, no filesystem side effects).
 if [[ "${BASH_SOURCE[0]:-}" == "${0}" ]]; then
+  preflight
   main "$@"
 fi
