@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read   # least privilege: CI only reads the repo
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck, jq, bats
+        run: sudo apt-get update && sudo apt-get install -y shellcheck jq bats
+
+      - name: ShellCheck
+        run: shellcheck auto-review.sh
+
+      - name: Tests (runner bash 5)
+        run: bats tests/
+
+      # The bot runs on macOS system bash 3.2 in production. This leg pins the
+      # bash *language* version (arrays, set -e/EOF semantics) — the dimension
+      # bash 5 on the runner hides. It does NOT cover BSD-vs-busybox tool-flag
+      # differences (Alpine ships busybox, not BSD coreutils); those are verified
+      # by running on the actual macOS host before deploy.
+      # `apk add bats` pulls bash 5 as a dependency, so assert we are really on
+      # bash 3.x before running — else this leg would silently pass under bash 5.
+      - name: Tests under bash 3.2 (macOS prod language target)
+        run: |
+          docker run --rm -v "$PWD:/code" -w /code bash:3.2 sh -c '
+            set -e
+            apk add --no-cache bats jq
+            ver=$(bash --version | head -1); echo "$ver"
+            case "$ver" in
+              *"version 3."*) ;;
+              *) echo "FATAL: 3.2 leg is not running bash 3.x: $ver" >&2; exit 1 ;;
+            esac
+            bats tests/'

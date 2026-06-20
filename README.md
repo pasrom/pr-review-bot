@@ -205,6 +205,24 @@ cost figures, but **no secrets/credentials**. The newest
 `ARCHIVE_KEEP` sessions per repo are kept; older ones are pruned. `ARCHIVE=0`
 disables it.
 
+## Development / tests
+
+The script is sourceable — its `BASH_SOURCE == $0` guard means `preflight` and
+`main` run only when it is *executed*, so a test can `source auto-review.sh` to
+reach the functions without acquiring the lock, checking tools, or writing to
+disk. The test suite mocks `gh` and `run_claude` (function definitions shadow the
+PATH commands), so it makes **no network or model calls**:
+
+```bash
+bats tests/          # needs `bats` and `jq`
+shellcheck auto-review.sh
+```
+
+CI (`.github/workflows/ci.yml`) runs ShellCheck + the suite on every push/PR,
+under **both** the runner's bash 5 and a `bash:3.2` container — the latter matches
+the macOS system bash the bot runs on in production, catching 3.2-only regressions
+(arrays, `set -e`/EOF behaviour, busybox tools) that bash 5 would hide.
+
 ## Guardrails (deliberate)
 
 - **Never approves, never merges** — comment-only. The verdict drives the
