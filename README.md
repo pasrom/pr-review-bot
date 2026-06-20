@@ -200,7 +200,8 @@ cc "$(cat ~/.local/state/pr-review-bot/archive/owner__repo/pr123-*.md)"
 # or open it directly in a Claude Code session and ask what went wrong
 ```
 
-It contains the PR diff (treat like repo content) but **no tokens**. The newest
+It contains the PR diff (treat like repo content) and per-review token-usage +
+cost figures, but **no secrets/credentials**. The newest
 `ARCHIVE_KEEP` sessions per repo are kept; older ones are pruned. `ARCHIVE=0`
 disables it.
 

@@ -86,6 +86,7 @@ ARCHIVE_DIR="$STATE_DIR/archive"
 # in a $(...) subshell, so globals set there would be lost — files survive.
 LAST_INPUT_FILE="$STATE_DIR/.last_input"
 LAST_INVOCATION_FILE="$STATE_DIR/.last_invocation"
+LAST_USAGE_FILE="$STATE_DIR/.last_usage"   # token usage + cost, one line per model call (reset per PR)
 log() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" | tee -a "$LOG" >&2; }
 
 # Single-flight lock (macOS has no flock; mkdir is atomic).
@@ -107,6 +108,54 @@ CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-600}"
 run_claude() {
   if [[ -n "$TIMEOUT_BIN" ]]; then "$TIMEOUT_BIN" "$CLAUDE_TIMEOUT" claude "$@"
   else claude "$@"; fi
+}
+
+# Run claude (JSON output) reading the model input from $LAST_INPUT_FILE, record
+# token usage + dollar cost, and emit ONLY the assistant text on stdout — so the
+# rest of the pipeline (parse_verdict/parse_body/is_valid_review) is unchanged
+# from the old --output-format text. Best-effort accounting: if the JSON can't be
+# parsed (call timed out or errored), the raw output is emitted unchanged so a
+# usage-logging hiccup can never block a review. Uses dynamically-scoped $pr etc.
+run_claude_review() { # args: claude flags ; stdin: $LAST_INPUT_FILE
+  local out result
+  out="$(run_claude "$@" < "$LAST_INPUT_FILE")" || true
+  # Record token usage + cost for EVERY model call (one line per call) — incl. a
+  # billed call that errored or was killed before finishing, so failed attempts
+  # still show their spend. record_usage logs "(usage unavailable)" when $out is
+  # not parseable JSON (e.g. a timeout that produced no output).
+  record_usage "$out"
+  # Treat ONLY a successful, non-error envelope with a non-empty .result as a
+  # review. An is_error=true envelope still carries a .result (the error text),
+  # so gating on .is_error keeps an API/timeout error from being emitted — and
+  # validated — as if it were a real review. Assumes the single-object
+  # --output-format json envelope (stream-json would emit many .result values).
+  if result="$(jq -er 'select(.is_error != true) | .result // empty' <<<"$out" 2>/dev/null)" && [[ -n "$result" ]]; then
+    printf '%s' "$result"
+  else
+    log "$GH_REPO #$pr: WARN no usable review from claude (timeout / API error / non-JSON) — emitting raw for validation"
+    printf '%s' "$out"
+  fi
+}
+
+# Parse claude's result JSON for token usage + dollar cost, log it, and append a
+# line to $LAST_USAGE_FILE (shown in the archive; one line per model call, so a
+# retried review records both attempts). Best-effort — never fails the caller.
+record_usage() { # arg: claude JSON result object
+  local line
+  line="$(jq -r '
+      "in=\(.usage.input_tokens // 0)"
+    + " out=\(.usage.output_tokens // 0)"
+    + " cache_w=\(.usage.cache_creation_input_tokens // 0)"
+    + " cache_r=\(.usage.cache_read_input_tokens // 0)"
+    + " cost_usd=\(.total_cost_usd // 0)"
+    + " turns=\(.num_turns // 0)"
+    + " api_ms=\(.duration_ms // 0)"' <<<"$1" 2>/dev/null)" || line=""
+  # jq yields an empty $line on a parse error (the `||` above) AND on empty /
+  # whitespace input (zero records, exit 0 — e.g. a billed call killed before it
+  # emitted output). Both mean we have no usable figures.
+  [[ -n "$line" ]] || line="(usage unavailable)"
+  log "$GH_REPO #$pr: usage [$MODE $MODEL] $line"
+  printf '%s\n' "$line" >> "$LAST_USAGE_FILE"
 }
 
 # ── Path router ──────────────────────────────────────────────────────────────
@@ -244,7 +293,7 @@ post_inline_review() { # args: <body_text> <kept_json>
 # input, raw output incl. retries, validation, inline anchoring, what was
 # posted) so a failed/odd review can be handed to Claude Code to debug. Reads
 # review_pr's dynamically-scoped locals + the LAST_INPUT/LAST_INVOCATION globals.
-# Contains the PR diff (treat like repo content); never contains tokens.
+# Contains the PR diff (treat like repo content); never contains secrets/credentials.
 archive_session() { # arg: outcome string
   [[ "$ARCHIVE" == "1" ]] || return 0
   local outcome="$1" dir ts file
@@ -263,6 +312,10 @@ archive_session() { # arg: outcome string
     echo "- decision: author=\`$author\` → mode=\`${MODE:-?}\` model=\`${MODEL:-?}\` domains=\`${DOMAINS:-?}\`"
     echo "- verdict: \`${verdict:-(not reached)}\`  inline comments: \`${ncomments:-0}\`  retried: \`$([[ "${retried:-0}" == "1" ]] && echo yes || echo no)\`"
     echo "- invocation: \`$(cat "$LAST_INVOCATION_FILE" 2>/dev/null || echo '?')\`"
+    if [[ -s "$LAST_USAGE_FILE" ]]; then
+      echo "- token usage + cost (per model call):"
+      while IFS= read -r u; do echo "    - \`$u\`"; done < "$LAST_USAGE_FILE"
+    fi
     echo
     echo "## Input sent to the model"
     echo
@@ -357,6 +410,7 @@ review_pr() {
   # conform, post nothing and log — no marker is written, so the next scheduled
   # run retries automatically (self-healing) rather than posting malformed text.
   local raw raw1 retried=0
+  : > "$LAST_USAGE_FILE"   # one usage line per model call for THIS PR (retry appends a 2nd)
   raw="$(run_model)"; raw1="$raw"
   if ! printf '%s' "$raw" | is_valid_review; then
     log "$GH_REPO #$pr: output did not match the contract — retrying once"
@@ -470,10 +524,10 @@ review_digest() {
   build_bundle "$pr" "$meta" > "$LAST_INPUT_FILE"
   printf 'digest | claude -p --model %s --system-prompt-file %s (no tools)\n' \
     "$MODEL" "$(basename "$PROMPT_FILE")" > "$LAST_INVOCATION_FILE"
-  run_claude -p \
-    --output-format text \
+  run_claude_review -p \
+    --output-format json \
     --model "$MODEL" \
-    --system-prompt-file "$PROMPT_FILE" < "$LAST_INPUT_FILE"
+    --system-prompt-file "$PROMPT_FILE"
 }
 
 # ── Agentic mode: check out the PR for cross-reading ─────────────────────────
@@ -528,12 +582,12 @@ elsewhere. Do not modify any files.$sub_line$inline_instr"
   { build_bundle "$pr" "$meta"; echo; echo "$extra"; } > "$LAST_INPUT_FILE"
   printf 'agentic | claude -p --model %s --add-dir %s --allowedTools Read Grep Glob Task --append-system-prompt-file %s\n' \
     "$MODEL" "$repo_dir" "$(basename "$PROMPT_FILE")" > "$LAST_INVOCATION_FILE"
-  run_claude -p \
-    --output-format text \
+  run_claude_review -p \
+    --output-format json \
     --model "$MODEL" \
     --add-dir "$repo_dir" \
     --allowedTools Read Grep Glob Task \
-    --append-system-prompt-file "$PROMPT_FILE" < "$LAST_INPUT_FILE"
+    --append-system-prompt-file "$PROMPT_FILE"
 }
 
 # ── Target selection ─────────────────────────────────────────────────────────
