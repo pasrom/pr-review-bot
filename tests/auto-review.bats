@@ -7,9 +7,13 @@
 # checks, no filesystem writes). Network/model calls are mocked by overriding the
 # `gh` and `run_claude` functions — function definitions shadow PATH commands.
 #
-# Sourcing the script also turns on `set -euo pipefail` in the test shell, so a
-# failing `[ ... ]` assertion aborts (and fails) the test. Commands whose
-# non-zero exit is the thing under test are wrapped in bats `run`.
+# Sourcing the script also turns on `set -euo pipefail` in the test shell. NOTE:
+# bash exempts a non-final `[[ ]]` from set -e, so a false `[[ ]]` that is not the
+# last command would silently NOT fail the test. Assert substrings via the
+# has()/lacks() helpers below (case-based, `return 1` on mismatch — a simple
+# command that DOES abort under set -e wherever it sits). Single-bracket `[ ]`
+# exact checks and bats `run` (for a command whose non-zero exit is under test)
+# are fine as-is.
 
 setup() {
   AR="$BATS_TEST_DIRNAME/../auto-review.sh"
@@ -43,6 +47,13 @@ gh() {
     *) echo "UNHANDLED gh $*" >&2; return 1 ;;
   esac
 }
+
+# Substring assertions that stay load-bearing regardless of position. A bare
+# `[[ $x == *needle* ]]` is exempt from set -e when it is not the last command,
+# so a false one mid-body would not fail the test; these `return 1` on mismatch
+# (a simple command, which set -e honours anywhere in the body).
+has()   { case "$2" in *"$1"*) return 0 ;; *) printf 'assert has: missing >>%s<<\n' "$1" >&2; return 1 ;; esac; }
+lacks() { case "$2" in *"$1"*) printf 'assert lacks: unexpected >>%s<<\n' "$1" >&2; return 1 ;; *) return 0 ;; esac; }
 
 # ── route() ──────────────────────────────────────────────────────────────────
 
@@ -137,8 +148,8 @@ gh() {
 @test "parse_body: cuts everything before the verdict line" {
   run parse_body <<<$'preamble noise\nVERDICT: green\n\n## Summary\nthe body'
   [ "$status" -eq 0 ]
-  [[ "$output" == "## Summary"* ]]
-  [[ "$output" != *"preamble"* ]]
+  has "## Summary" "$output"
+  lacks "preamble" "$output"
 }
 
 # ── record_usage() ───────────────────────────────────────────────────────────
@@ -174,7 +185,7 @@ gh() {
   out="$(run_claude_review -p)"
   run is_valid_review <<<"$out"
   [ "$status" -eq 0 ]
-  [[ "$(cat "$LAST_USAGE_FILE")" == "in=7 out=8 "* ]]
+  has "in=7 out=8 " "$(cat "$LAST_USAGE_FILE")"
 }
 
 @test "run_claude_review: is_error envelope is NOT emitted as a review (but its cost IS recorded)" {
@@ -184,7 +195,7 @@ gh() {
   out="$(run_claude_review -p)"
   run is_valid_review <<<"$out"
   [ "$status" -ne 0 ]
-  [[ "$(cat "$LAST_USAGE_FILE")" == *"cost_usd=0.5"* ]]
+  has "cost_usd=0.5" "$(cat "$LAST_USAGE_FILE")"
 }
 
 @test "run_claude_review: empty output (timeout) → not a review, usage unavailable" {
@@ -250,7 +261,7 @@ owner/a   @me
 EOF
   run bash -c "set -euo pipefail; source '$AR'; REPOS_FILE='$STATE_DIR/r.conf'; load_repos; echo rc=\$?"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"rc=0"* ]]
+  has "rc=0" "$output"
 }
 
 # ── next_cursor() ────────────────────────────────────────────────────────────
@@ -273,10 +284,10 @@ EOF
 @test "extract_inline / strip_inline: pull and remove the sentinel block" {
   body=$'## Summary\nfoo\n@@INLINE@@\n[{"path":"a.ts","line":3,"body":"x"}]\n@@END_INLINE@@\n'
   run extract_inline <<<"$body"
-  [[ "$output" == *'"path":"a.ts"'* ]]
+  has '"path":"a.ts"' "$output"
   out="$(strip_inline <<<"$body")"
-  [[ "$out" != *"@@INLINE@@"* ]]
-  [[ "$out" == *"## Summary"* ]]
+  lacks "@@INLINE@@" "$out"
+  has "## Summary" "$out"
 }
 
 @test "anchor_filter: keeps on-diff lines, drops off-diff ones" {
@@ -300,10 +311,10 @@ EOF
   DRY_RUN=1
   run review_pr 5
   [ "$status" -eq 0 ]
-  [[ "$output" == *"DRY_RUN — would post (verdict=yellow)"* ]]
-  [[ "$output" == *"<!-- auto-review v1 | repo=owner/repo | pr=5 | sha=abcdef123456"* ]]
-  [[ "$output" == *"verdict=yellow"* ]]
-  [[ "$output" == *"mode=digest"* ]]
+  has "DRY_RUN — would post (verdict=yellow)" "$output"
+  has "<!-- auto-review v1 | repo=owner/repo | pr=5 | sha=abcdef123456" "$output"
+  has "verdict=yellow" "$output"
+  has "mode=digest" "$output"
 }
 
 @test "review_pr: skips a draft PR" {
@@ -312,13 +323,13 @@ EOF
 EOF
   run review_pr 6
   [ "$status" -eq 0 ]
-  [[ "$output" == *"draft, skip"* ]]
+  has "draft, skip" "$output"
 }
 
 @test "review_pr: rejects a non-numeric PR id (injection guard)" {
   run review_pr '5; rm -rf /'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"not a numeric id"* ]]
+  has "not a numeric id" "$output"
 }
 
 @test "route: webhook path → sensitive/agentic" {
@@ -344,9 +355,9 @@ EOF
   DRY_RUN=1
   run review_pr 7
   [ "$status" -eq 0 ]
-  [[ "$output" == *"cross-repository (fork)"* ]]
-  [[ "$output" == *"forcing digest"* ]]
-  [[ "$output" == *"mode=digest"* ]]
+  has "cross-repository (fork)" "$output"
+  has "forcing digest" "$output"
+  has "mode=digest" "$output"
 }
 
 @test "review_pr: skips when a prior comment already carries the marker for this SHA (dedup)" {
@@ -358,7 +369,7 @@ EOF
   run_claude() { echo "SHOULD-NOT-CALL-THE-MODEL" >&2; return 1; }
   run review_pr 8
   [ "$status" -eq 0 ]
-  [[ "$output" == *"already reviewed, skip"* ]]
+  has "already reviewed, skip" "$output"
 }
 
 @test "review_pr: invalid first output retries once, then posts the valid retry (self-heal)" {
@@ -378,9 +389,9 @@ EOF
   DRY_RUN=1
   run review_pr 9
   [ "$status" -eq 0 ]
-  [[ "$output" == *"retrying once"* ]]
-  [[ "$output" == *"retry produced a valid review"* ]]
-  [[ "$output" == *"would post (verdict=green)"* ]]
+  has "retrying once" "$output"
+  has "retry produced a valid review" "$output"
+  has "would post (verdict=green)" "$output"
 }
 
 @test "review_pr: invalid output twice → skipped, nothing posted (self-heal next run)" {
@@ -391,8 +402,8 @@ EOF
   DRY_RUN=1
   run review_pr 10
   [ "$status" -eq 0 ]
-  [[ "$output" == *"still non-conforming after retry"* ]]
-  [[ "$output" != *"would post"* ]]
+  has "still non-conforming after retry" "$output"
+  lacks "would post" "$output"
 }
 
 # ── preflight() — runs only on exec, so it is tested via a subprocess ─────────
@@ -402,7 +413,7 @@ EOF
   mkdir "$STATE_DIR/.lock"   # simulate another run already holding the lock
   run env STATE_DIR="$STATE_DIR" REPOS_FILE=/dev/null bash "$AR"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"another run holds the lock"* ]]
+  has "another run holds the lock" "$output"
 }
 
 @test "preflight: a missing required tool is fatal (exit 1)" {
@@ -410,8 +421,8 @@ EOF
   # PATH has coreutils (date/tee/mkdir) but not claude/gh → the tool check fails.
   run env PATH=/usr/bin:/bin STATE_DIR="$STATE_DIR" REPOS_FILE=/dev/null bash "$AR"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"FATAL:"* ]]
-  [[ "$output" == *"not on PATH"* ]]
+  has "FATAL:" "$output"
+  has "not on PATH" "$output"
 }
 
 # ── effective_actions() + repos.conf 3rd column ──────────────────────────────
@@ -449,9 +460,9 @@ EOF
   ACTIONS_MODE=gate; DRY_RUN=1
   run review_pr 20
   [ "$status" -eq 0 ]
-  [[ "$output" == *"would submit APPROVE"* ]]
-  [[ "$output" == *'"event": "APPROVE"'* ]]
-  [[ "$output" == *"event=APPROVE"* ]]
+  has "would submit APPROVE" "$output"
+  has '"event": "APPROVE"' "$output"
+  has "event=APPROVE" "$output"
 }
 
 @test "gate mode: red verdict → REQUEST_CHANGES via the Reviews API" {
@@ -462,8 +473,8 @@ EOF
   ACTIONS_MODE=gate; DRY_RUN=1
   run review_pr 21
   [ "$status" -eq 0 ]
-  [[ "$output" == *"would submit REQUEST_CHANGES"* ]]
-  [[ "$output" == *'"event": "REQUEST_CHANGES"'* ]]
+  has "would submit REQUEST_CHANGES" "$output"
+  has '"event": "REQUEST_CHANGES"' "$output"
 }
 
 @test "gate mode: yellow verdict stays a COMMENT (neither approve nor block)" {
@@ -474,9 +485,9 @@ EOF
   ACTIONS_MODE=gate; DRY_RUN=1
   run review_pr 22
   [ "$status" -eq 0 ]
-  [[ "$output" == *"would post (verdict=yellow)"* ]]
-  [[ "$output" == *"event=COMMENT"* ]]
-  [[ "$output" != *APPROVE* ]]
+  has "would post (verdict=yellow)" "$output"
+  has "event=COMMENT" "$output"
+  lacks "would submit" "$output"
 }
 
 @test "gate mode: a fork PR is never auto-APPROVEd (downgraded to COMMENT)" {
@@ -487,7 +498,36 @@ EOF
   ACTIONS_MODE=gate; DRY_RUN=1
   run review_pr 23
   [ "$status" -eq 0 ]
-  [[ "$output" == *"not auto-approving; downgrading APPROVE to COMMENT"* ]]
-  [[ "$output" != *"would submit APPROVE"* ]]
-  [[ "$output" == *"event=COMMENT"* ]]
+  has "not auto-approving; downgrading APPROVE to COMMENT" "$output"
+  lacks "would submit APPROVE" "$output"
+  has "event=COMMENT" "$output"
+}
+
+@test "default (comment) mode: a green verdict does NOT approve (gate off by default)" {
+  # The headline safety invariant: with no gate configured, green is COMMENT-only.
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":24,"title":"x","headRefOid":"eeee111122223333","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
+EOF
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: green\n\n## Summary\nlgtm","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  # ACTIONS_MODE intentionally unset → review_pr falls back to comment.
+  DRY_RUN=1
+  run review_pr 24
+  [ "$status" -eq 0 ]
+  has "would post (verdict=green)" "$output"
+  has "event=COMMENT" "$output"
+  lacks "would submit" "$output"
+}
+
+@test "gate mode: a missing isCrossRepository fails closed (treated as fork, not auto-APPROVEd)" {
+  # No isCrossRepository field at all — must NOT be treated as same-repo.
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":25,"title":"x","headRefOid":"ffff111122223333","author":{"login":"mallory"},"isDraft":false,"state":"OPEN","files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
+EOF
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: green\n\n## Summary\nlgtm","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  ACTIONS_MODE=gate; DRY_RUN=1
+  run review_pr 25
+  [ "$status" -eq 0 ]
+  has "not auto-approving; downgrading APPROVE to COMMENT" "$output"
+  lacks "would submit APPROVE" "$output"
+  has "event=COMMENT" "$output"
 }
