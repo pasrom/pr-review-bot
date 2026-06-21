@@ -5,8 +5,9 @@
 A generic, self-hosted **headless PR pre-reviewer**. A single Bash script
 (`auto-review.sh`) runs `claude -p` against open pull requests of one or more
 target repositories and posts an English pre-review comment via the `gh` CLI.
-It is **comment-only**: it never approves and never merges — a human reviewer
-makes the final call. Designed to run unattended on a Mac mini via `launchd`.
+**Comment-only by default**: it never merges, and never approves/requests-changes
+unless a repo opts into "gate" mode (see Security posture) — a human makes the
+final call. Designed to run unattended on a Mac mini via `launchd`.
 
 Not a product/library: there is no build, no dependencies to install. The only
 runtime requirements are `claude`, `gh`, `jq`, `git`, and (for the timeout
@@ -54,10 +55,18 @@ guard) `timeout`/`gtimeout`.
 
 ## Security posture (these are load-bearing — preserve them)
 
-- **Never add an approve/merge path.** No `gh pr review --approve`, no
-  `gh pr merge`. The verdict drives the comment/labels only. Inline reviews use
-  `event:"COMMENT"` only — never `APPROVE`/`REQUEST_CHANGES` (the latter is a
-  blocking gate).
+- **Never merge.** No `gh pr merge`, ever — a human owns the merge; the bot only
+  reviews.
+- **Comment-only is the DEFAULT.** Out of the box the verdict drives a COMMENT
+  review / issue comment — never `APPROVE`/`REQUEST_CHANGES`. An opt-in, per-repo
+  **gate** mode (`REVIEW_ACTIONS=gate`, or a `repos.conf` 3rd column) maps the
+  verdict to a blocking review: green→`APPROVE`, red→`REQUEST_CHANGES`,
+  yellow→`COMMENT`. Gate mode is OFF unless explicitly enabled for a repo, and a
+  typo'd value fails safe to `comment`. Even in gate mode a fork (cross-repository)
+  PR is **never auto-APPROVEd** — it downgrades to `COMMENT` (don't rubber-stamp
+  untrusted external code). Note: an enabled `APPROVE` can satisfy branch-protection
+  approval counts, so a repo needing human sign-off must require a human/CODEOWNERS
+  approval in branch protection — that is the operator's responsibility, not the bot's.
 - **Inline comments are anchor-validated against the diff** before posting; never
   post model-supplied line numbers unchecked (off-diff lines 422 the review).
 - **Fork PRs are never checked out** — a cross-repository PR is forced to the

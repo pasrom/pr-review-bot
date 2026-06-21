@@ -1,4 +1,4 @@
-# Repositories the bot reviews, one line per repo:  owner/name  [reviewer-filter]
+# Repositories the bot reviews, one line per repo:  owner/name  [filter]  [actions]
 # Copy this to repos.conf and edit. '#' starts a comment; blank lines are ignored.
 #
 # Optional 2nd column = which PRs to review in that repo (overrides the global
@@ -7,6 +7,15 @@
 #   *               every open PR
 #   (omitted)       fall back to the global REVIEW_REQUESTED default
 #
+# Optional 3rd column = what the verdict does (overrides the global REVIEW_ACTIONS
+# default; requires a 2nd column to be present so the columns don't shift):
+#   comment   post a COMMENT only — never approve/block (default, safest)
+#   gate      verdict drives a BLOCKING review: green=APPROVE, red=REQUEST_CHANGES,
+#             yellow=COMMENT. A fork PR is never auto-approved. The bot still never
+#             merges. NOTE: an APPROVE can satisfy branch-protection approval counts
+#             — require a human/CODEOWNERS approval if a person must sign off.
+#   (omitted) fall back to the global REVIEW_ACTIONS default (comment)
+#
 # In rotation mode (./auto-review.sh with no GH_REPO) each scheduled run reviews
 # ONE repo from this list, advancing round-robin. With a 15-min timer that means
 # repo #1 now, repo #2 in 15 min, repo #3 in 30 min, … — they are staggered, not
@@ -14,6 +23,7 @@
 #
 # ALL=1 ./auto-review.sh reviews every repo below in a single run (catch-up).
 
-owner/first-repo        @me     # only PRs that request the bot as reviewer
-owner/second-repo       *       # every open PR
-owner/third-repo                # uses the global REVIEW_REQUESTED default
+owner/first-repo        @me     # opt-in PRs, comment-only (default actions)
+owner/second-repo       *       # every open PR, comment-only
+owner/third-repo                # global REVIEW_REQUESTED + REVIEW_ACTIONS defaults
+owner/gated-repo        @me  gate   # opt-in PRs; verdict APPROVES / REQUESTS-CHANGES

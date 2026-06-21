@@ -413,3 +413,81 @@ EOF
   [[ "$output" == *"FATAL:"* ]]
   [[ "$output" == *"not on PATH"* ]]
 }
+
+# ── effective_actions() + repos.conf 3rd column ──────────────────────────────
+
+@test "effective_actions: absent → global REVIEW_ACTIONS default" {
+  REVIEW_ACTIONS=gate
+  [ "$(effective_actions "")" = "gate" ]
+}
+
+@test "effective_actions: comment/gate pass through" {
+  [ "$(effective_actions comment)" = "comment" ]
+  [ "$(effective_actions gate)" = "gate" ]
+}
+
+@test "effective_actions: an unknown value falls back to comment (fail safe)" {
+  [ "$(effective_actions bogus)" = "comment" ]
+}
+
+@test "load_repos: parses the optional 3rd (actions) column" {
+  REPOS_FILE="$STATE_DIR/repos.conf"
+  printf '%s\n' 'owner/a   @me   gate' 'owner/b   *   comment' 'owner/c' > "$REPOS_FILE"
+  load_repos
+  [ "${REPO_ACTIONS[0]}" = "gate" ]
+  [ "${REPO_ACTIONS[1]}" = "comment" ]
+  [ "${REPO_ACTIONS[2]}" = "" ]
+}
+
+# ── review_pr() — gate mode (verdict drives APPROVE / REQUEST_CHANGES) ────────
+
+@test "gate mode: green verdict → APPROVE via the Reviews API" {
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":20,"title":"x","headRefOid":"aaaa111122223333","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
+EOF
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: green\n\n## Summary\nlgtm","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  ACTIONS_MODE=gate; DRY_RUN=1
+  run review_pr 20
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"would submit APPROVE"* ]]
+  [[ "$output" == *'"event": "APPROVE"'* ]]
+  [[ "$output" == *"event=APPROVE"* ]]
+}
+
+@test "gate mode: red verdict → REQUEST_CHANGES via the Reviews API" {
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":21,"title":"x","headRefOid":"bbbb111122223333","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
+EOF
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: red\n\n## Findings\n- bad","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  ACTIONS_MODE=gate; DRY_RUN=1
+  run review_pr 21
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"would submit REQUEST_CHANGES"* ]]
+  [[ "$output" == *'"event": "REQUEST_CHANGES"'* ]]
+}
+
+@test "gate mode: yellow verdict stays a COMMENT (neither approve nor block)" {
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":22,"title":"x","headRefOid":"cccc111122223333","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
+EOF
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: yellow\n\n## Summary\nmeh","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  ACTIONS_MODE=gate; DRY_RUN=1
+  run review_pr 22
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"would post (verdict=yellow)"* ]]
+  [[ "$output" == *"event=COMMENT"* ]]
+  [[ "$output" != *APPROVE* ]]
+}
+
+@test "gate mode: a fork PR is never auto-APPROVEd (downgraded to COMMENT)" {
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":23,"title":"x","headRefOid":"dddd111122223333","author":{"login":"mallory"},"isDraft":false,"state":"OPEN","isCrossRepository":true,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
+EOF
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: green\n\n## Summary\nlgtm","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  ACTIONS_MODE=gate; DRY_RUN=1
+  run review_pr 23
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not auto-approving; downgrading APPROVE to COMMENT"* ]]
+  [[ "$output" != *"would submit APPROVE"* ]]
+  [[ "$output" == *"event=COMMENT"* ]]
+}

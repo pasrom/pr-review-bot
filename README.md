@@ -10,9 +10,12 @@ It is repo-agnostic: point it at any repo with `GH_REPO`, or list several in
 coupling, no self-review recursion) and **self-manages a disposable clone** per
 target for its deep-review mode — you never point it at a working copy.
 
-> **It is a *pre*-review aid, not a gate.** It never approves and never merges —
-> a human reviewer makes the final call. The posted comment is clearly labelled
-> as an automated pre-review.
+> **By default it is a *pre*-review aid, not a gate.** Out of the box it never
+> approves and never merges — a human makes the final call, and each comment is
+> clearly labelled as an automated pre-review. An optional, per-repo **gate mode**
+> (off by default) lets the verdict drive a blocking APPROVE / REQUEST_CHANGES
+> review — but it still **never merges**. See `REVIEW_ACTIONS` under
+> [Env knobs](#env-knobs).
 
 ## How it works
 
@@ -84,9 +87,10 @@ sentinel-delimited JSON array (`@@INLINE@@ … @@END_INLINE@@`) of
    lines on the new side are commentable. GitHub rejects the *whole* review
    (422) if any comment is off-diff, so unanchorable entries are **dropped and
    logged**, not posted.
-2. Posts **one** review via the Reviews API with `event: "COMMENT"` — the
-   summary as the review body plus the anchored inline comments. `COMMENT` never
-   approves or requests changes, so the comment-only guarantee holds.
+2. Posts **one** review via the Reviews API — the summary as the review body plus
+   the anchored inline comments. In the default `comment` mode the event is
+   `COMMENT` (never approves or requests changes); in `gate` mode the event
+   follows the verdict (`REVIEW_ACTIONS`, below).
 
 If no inline comments survive (or in digest mode), it falls back to a single
 summary issue comment. Inline is capped (≤10) and reserved for agentic mode;
@@ -139,6 +143,7 @@ cursor wraps over the current length.
 | `REPOS_FILE` | `./repos.conf` | rotation list, one `owner/name` per line |
 | `ALL` | `0` | rotation mode: review every listed repo this run |
 | `REVIEW_REQUESTED` | _(unset)_ | **global default** opt-in login (e.g. `@me` = the token account): only review open PRs that request it; unset reviews every open PR. A `repos.conf` 2nd column overrides it per repo (`*` = review all). |
+| `REVIEW_ACTIONS` | `comment` | verdict→action mode. `comment` (default): post a COMMENT only — never approve/block. `gate`: the verdict submits a **blocking** review (green→`APPROVE`, red→`REQUEST_CHANGES`, yellow→`COMMENT`); a fork PR is never auto-approved. A `repos.conf` 3rd column overrides it per repo. Still never merges. |
 | `SUBAGENTS` | _(unset)_ | space-separated review subagent names for agentic mode |
 | `PROMPT_FILE` | `./reviewer-prompt.md` | reviewer persona (override per target) |
 | `REPO_DIR` | `$STATE_DIR/checkout/<owner__repo>` | self-managed disposable clone (agentic) |
@@ -225,10 +230,13 @@ the macOS system bash the bot runs on in production, catching 3.2-only regressio
 
 ## Guardrails (deliberate)
 
-- **Never approves, never merges** — comment-only. The verdict drives the
-  comment (and optionally labels), nothing else.
-- **Posts as a bot pre-review**, clearly banner-labelled, so it can't be mistaken
-  for a human approval.
+- **Never merges** — a human owns the merge. By default also **never approves or
+  blocks** (comment-only); the verdict drives only the comment. The optional
+  per-repo `gate` mode lets the verdict submit an APPROVE/REQUEST_CHANGES review,
+  but a fork PR is never auto-approved and the bot still never merges.
+- **Posts as a bot review**, clearly banner-labelled (the banner names whether it
+  is a pre-review comment or a verdict-driven approval/change-request), so it
+  can't be mistaken for a human judgment.
 - **English, no internal tool/agent names** in the public comment.
 - **Cost is gated by risk** — only security-sensitive touchpoints get the
   expensive agentic pass; the routine majority runs cheap.

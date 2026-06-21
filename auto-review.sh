@@ -3,8 +3,9 @@
 # auto-review.sh — headless Claude PR pre-reviewer (generic, multi-repo).
 #
 # Runs `claude -p` against open pull requests of one or more target repos and
-# posts an English pre-review comment via `gh`. It is a *pre*-review aid only:
-# it never approves and never merges — a human reviewer makes the final call.
+# posts an English review via `gh`. Comment-only by default (a *pre*-review aid):
+# it never merges, and never approves/requests-changes unless a repo opts into
+# "gate" mode (REVIEW_ACTIONS) — a human makes the final call.
 #
 # Design (see README.md):
 #   - The script does all deterministic work (fetch, metadata, CI status,
@@ -73,9 +74,11 @@ ARCHIVE_KEEP="${ARCHIVE_KEEP:-200}"   # max archived sessions kept per repo
 DRY_RUN="${DRY_RUN:-0}"
 FORCE="${FORCE:-0}"
 REVIEW_REQUESTED="${REVIEW_REQUESTED:-}"  # global default opt-in login (e.g. @me); a repos.conf 2nd column overrides it per repo
+REVIEW_ACTIONS="${REVIEW_ACTIONS:-comment}"  # global default verdict->action mode (comment|gate); a repos.conf 3rd column overrides it per repo
 MARKER="auto-review v1"
 REPOS=()
 REPO_FILTERS=()   # parallel to REPOS: per-repo review-requested override from repos.conf col 2
+REPO_ACTIONS=()   # parallel to REPOS: per-repo actions mode (comment|gate) from repos.conf col 3
 
 LOG="$STATE_DIR/auto-review.log"
 CURSOR="$STATE_DIR/cursor"
@@ -283,12 +286,14 @@ anchor_filter() {
   rm -f "$anchors" "$kept"
 }
 
-# Post a single COMMENT review (summary body + inline comments) via the Reviews
-# API. event=COMMENT never approves/requests-changes. uses $pr,$GH_REPO,$sha.
-post_inline_review() { # args: <body_text> <kept_json>
-  local payload
-  payload="$(jq -n --arg sha "$sha" --arg body "$1" --argjson cs "$2" \
-    '{commit_id:$sha, event:"COMMENT", body:$body, comments:$cs}')"
+# Submit a single review (summary body + optional inline comments) via the
+# Reviews API with the given event. COMMENT never approves/blocks; APPROVE and
+# REQUEST_CHANGES are only ever used in per-repo "gate" mode (see review_pr).
+# uses $pr,$GH_REPO,$sha.
+post_review() { # args: <body_text> <kept_json> [event=COMMENT]
+  local event="${3:-COMMENT}" payload
+  payload="$(jq -n --arg sha "$sha" --arg body "$1" --argjson cs "$2" --arg ev "$event" \
+    '{commit_id:$sha, event:$ev, body:$body, comments:$cs}')"
   if [[ "$DRY_RUN" == "1" ]]; then
     printf '%s\n' "$payload"
   else
@@ -384,6 +389,10 @@ review_pr() {
   short="${sha:0:12}"
   files="$(jq -r '.files[].path' <<<"$meta")"
   fork="$(jq -r '.isCrossRepository' <<<"$meta")"
+  # Fail closed: a missing/null isCrossRepository (jq prints "null") must NOT be
+  # treated as same-repo. Anything but an explicit "false" is treated as a fork
+  # (untrusted) — this is the trust boundary for both no-checkout and no-auto-approve.
+  [[ "$fork" == "false" ]] || fork="true"
 
   # Dedup: already reviewed this exact head commit? Match the FULL marker prefix
   # (not a loose substring) so a PR author cannot spoof a comment to suppress the
@@ -456,30 +465,54 @@ review_pr() {
     body="$(printf '%s\n' "$body" | head -n 600)"$'\n\n_Output truncated by the reviewer (exceeded 600 lines)._'
   fi
 
+  # Verdict -> review event. Default ("comment" mode): always COMMENT — the bot
+  # advises, a human decides. In per-repo "gate" mode the verdict drives a
+  # blocking review: green->APPROVE, red->REQUEST_CHANGES, yellow->COMMENT.
+  # Safety: never auto-APPROVE a fork PR (don't rubber-stamp untrusted external
+  # code) — downgrade it to COMMENT. REQUEST_CHANGES on a fork is fine.
+  local event="COMMENT"
+  if [[ "${ACTIONS_MODE:-comment}" == "gate" ]]; then
+    case "$verdict" in
+      green) event="APPROVE" ;;
+      red)   event="REQUEST_CHANGES" ;;
+    esac
+    if [[ "$event" == "APPROVE" && "$fork" == "true" ]]; then
+      event="COMMENT"
+      log "$GH_REPO #$pr: fork PR — not auto-approving; downgrading APPROVE to COMMENT"
+    fi
+  fi
+
+  local banner
+  case "$event" in
+    APPROVE)         banner='> 🤖 **Automated review** — a verdict-driven **approval**, not a human judgment. If a person must sign off before merge, require a human/CODEOWNERS approval in branch protection.' ;;
+    REQUEST_CHANGES) banner='> 🤖 **Automated review** — a verdict-driven **change request**, not a human judgment. A human makes the final call.' ;;
+    *)               banner='> 🤖 **Automated pre-review** — not a human approval. A human reviewer makes the final call.' ;;
+  esac
+
   local comment
   comment="$(
-    printf '<!-- %s | repo=%s | pr=%s | sha=%s | verdict=%s | model=%s | mode=%s | domains=%s | inline=%s -->\n' \
-      "$MARKER" "$GH_REPO" "$pr" "$short" "$verdict" "$MODEL" "$MODE" "$DOMAINS" "$ncomments"
-    printf '> 🤖 **Automated pre-review** — not a human approval. A human reviewer makes the final call.\n\n'
+    printf '<!-- %s | repo=%s | pr=%s | sha=%s | verdict=%s | event=%s | model=%s | mode=%s | domains=%s | inline=%s -->\n' \
+      "$MARKER" "$GH_REPO" "$pr" "$short" "$verdict" "$event" "$MODEL" "$MODE" "$DOMAINS" "$ncomments"
+    printf '%s\n\n' "$banner"
     printf '%s\n\n' "## $(emoji "$verdict") Verdict: \`$verdict\`"
     printf '%s\n' "$body"
     printf '\n<!-- /auto-review -->\n'
   )"
 
   local outcome
-  if [[ "$ncomments" -gt 0 ]]; then
-    # Single COMMENT review: summary as the review body + anchored inline comments.
+  if [[ "$event" != "COMMENT" || "$ncomments" -gt 0 ]]; then
+    # Reviews API: required for APPROVE/REQUEST_CHANGES, and for inline comments.
     if [[ "$DRY_RUN" == "1" ]]; then
-      log "$GH_REPO #$pr: DRY_RUN — would post review (verdict=$verdict, $ncomments inline comment(s)):"
-      post_inline_review "$comment" "$inline_json"
-      outcome="DRY_RUN: review with $ncomments inline comment(s) (verdict=$verdict)"
+      log "$GH_REPO #$pr: DRY_RUN — would submit $event review (verdict=$verdict, $ncomments inline):"
+      post_review "$comment" "$inline_json" "$event"
+      outcome="DRY_RUN: $event review, $ncomments inline (verdict=$verdict)"
     else
-      post_inline_review "$comment" "$inline_json"
-      log "$GH_REPO #$pr: posted pre-review with $ncomments inline comment(s) (verdict=$verdict)"
-      outcome="posted review with $ncomments inline comment(s) (verdict=$verdict)"
+      post_review "$comment" "$inline_json" "$event"
+      log "$GH_REPO #$pr: submitted $event review ($ncomments inline, verdict=$verdict)"
+      outcome="submitted $event review ($ncomments inline, verdict=$verdict)"
     fi
   else
-    # Summary-only issue comment.
+    # Summary-only issue comment (COMMENT, no inline) — cheap, never approves/blocks.
     if [[ "$DRY_RUN" == "1" ]]; then
       log "$GH_REPO #$pr: DRY_RUN — would post (verdict=$verdict):"
       printf '%s\n' "$comment"
@@ -601,14 +634,14 @@ elsewhere. Do not modify any files.$sub_line$inline_instr"
 # ── Target selection ─────────────────────────────────────────────────────────
 # Read REPOS_FILE → REPOS[] (one owner/name per line; '#' comments, blanks ok).
 load_repos() {
-  REPOS=(); REPO_FILTERS=()
+  REPOS=(); REPO_FILTERS=(); REPO_ACTIONS=()
   [[ -f "$REPOS_FILE" ]] || return 0
-  local line repo filter
+  local line repo filter action
   while IFS= read -r line || [[ -n "$line" ]]; do
-    line="${line%%#*}"                  # drop inline comments
-    line="${line//$'\r'/}"              # tolerate CRLF-edited repos.conf (the old tr -d stripped \r)
-    read -r repo filter _ <<<"$line"    # split: "owner/name [filter]" (extra tokens ignored)
-    [[ -n "$repo" ]] && { REPOS+=("$repo"); REPO_FILTERS+=("$filter"); }
+    line="${line%%#*}"                       # drop inline comments
+    line="${line//$'\r'/}"                   # tolerate CRLF-edited repos.conf (the old tr -d stripped \r)
+    read -r repo filter action _ <<<"$line"  # split: "owner/name [filter] [actions]" (extra tokens ignored)
+    [[ -n "$repo" ]] && { REPOS+=("$repo"); REPO_FILTERS+=("$filter"); REPO_ACTIONS+=("$action"); }
   done < "$REPOS_FILE"
   # The trailing `read` returns non-zero at EOF; without this the function would
   # inherit that status and `set -e` would kill the (rotation) caller mid-run.
@@ -627,6 +660,18 @@ effective_filter() {
   esac
 }
 
+# Resolve a repo's effective actions mode from its repos.conf 3rd column:
+#   (absent)         -> the global $REVIEW_ACTIONS default
+#   comment | gate   -> as given (gate = verdict drives APPROVE/REQUEST_CHANGES)
+#   anything else    -> comment (fail safe: a typo must never enable gating)
+effective_actions() {
+  case "$1" in
+    '')           printf '%s' "$REVIEW_ACTIONS" ;;
+    comment|gate) printf '%s' "$1" ;;
+    *)            printf '%s' comment ;;
+  esac
+}
+
 # Round-robin cursor: print this run's index in [0,n), advance the stored value.
 next_cursor() {
   local n="$1" cur=0
@@ -641,6 +686,10 @@ next_cursor() {
 poll_repo() {
   GH_REPO="$1"
   local filter="${2:-}"
+  ACTIONS_MODE="${3:-$REVIEW_ACTIONS}"   # global (read by review_pr); set per-repo in rotation
+  if [[ "$ACTIONS_MODE" == "gate" ]]; then
+    log "$GH_REPO: GATE MODE active — the verdict submits APPROVE/REQUEST_CHANGES; ensure branch protection requires a human/CODEOWNERS approval if a person must sign off before merge"
+  fi
   local prs=() n listmsg sel=()
   # Opt-in mode (filter set): only PRs that explicitly request this account as a
   # reviewer — GitHub's search resolves @me to the token account. Otherwise:
@@ -655,7 +704,7 @@ poll_repo() {
       --json number,author -q 'sort_by(.author.login != "dependabot[bot]") | .[].number' 2>/dev/null
   )
   if (( ${#prs[@]} == 0 )); then log "$GH_REPO: no PRs to review ($listmsg)"; return; fi
-  log "$GH_REPO: reviewing PRs ${prs[*]} ($listmsg)"
+  log "$GH_REPO: reviewing PRs ${prs[*]} ($listmsg, actions=$ACTIONS_MODE)"
   local pr
   for pr in "${prs[@]}"; do
     review_pr "$pr" || log "$GH_REPO #$pr: review failed (continuing)"
@@ -668,9 +717,10 @@ main() {
   if [[ -n "$GH_REPO" ]]; then
     if (( $# )); then
       local pr
+      ACTIONS_MODE="$REVIEW_ACTIONS"
       for pr in "$@"; do review_pr "$pr" || log "$GH_REPO #$pr: review failed (continuing)"; done
     else
-      poll_repo "$GH_REPO" "$REVIEW_REQUESTED"
+      poll_repo "$GH_REPO" "$REVIEW_REQUESTED" "$REVIEW_ACTIONS"
     fi
     return
   fi
@@ -686,7 +736,7 @@ main() {
     log "ALL mode: ${#REPOS[@]} repos this run"
     local i
     for ((i = 0; i < ${#REPOS[@]}; i++)); do
-      poll_repo "${REPOS[$i]}" "$(effective_filter "${REPO_FILTERS[$i]}")"
+      poll_repo "${REPOS[$i]}" "$(effective_filter "${REPO_FILTERS[$i]}")" "$(effective_actions "${REPO_ACTIONS[$i]}")"
     done
     return
   fi
@@ -695,7 +745,7 @@ main() {
   local n="${#REPOS[@]}" idx
   idx="$(next_cursor "$n")"
   log "rotation: slot $((idx + 1))/$n → ${REPOS[$idx]}"
-  poll_repo "${REPOS[$idx]}" "$(effective_filter "${REPO_FILTERS[$idx]}")"
+  poll_repo "${REPOS[$idx]}" "$(effective_filter "${REPO_FILTERS[$idx]}")" "$(effective_actions "${REPO_ACTIONS[$idx]}")"
 }
 
 # Run main only when executed directly. Sourcing exposes the functions for tests
