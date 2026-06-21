@@ -467,14 +467,15 @@ review_pr() {
 
   # Verdict -> review event. Default ("comment" mode): always COMMENT — the bot
   # advises, a human decides. In per-repo "gate" mode the verdict drives a
-  # blocking review: green->APPROVE, red->REQUEST_CHANGES, yellow->COMMENT.
+  # blocking review: green->APPROVE, yellow/red->REQUEST_CHANGES (only a clean
+  # green approves; any concern requests changes).
   # Safety: never auto-APPROVE a fork PR (don't rubber-stamp untrusted external
   # code) — downgrade it to COMMENT. REQUEST_CHANGES on a fork is fine.
   local event="COMMENT"
   if [[ "${ACTIONS_MODE:-comment}" == "gate" ]]; then
     case "$verdict" in
-      green) event="APPROVE" ;;
-      red)   event="REQUEST_CHANGES" ;;
+      green)      event="APPROVE" ;;
+      yellow|red) event="REQUEST_CHANGES" ;;
     esac
     if [[ "$event" == "APPROVE" && "$fork" == "true" ]]; then
       event="COMMENT"

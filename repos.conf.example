@@ -10,8 +10,8 @@
 # Optional 3rd column = what the verdict does (overrides the global REVIEW_ACTIONS
 # default; requires a 2nd column to be present so the columns don't shift):
 #   comment   post a COMMENT only — never approve/block (default, safest)
-#   gate      verdict drives a BLOCKING review: green=APPROVE, red=REQUEST_CHANGES,
-#             yellow=COMMENT. A fork PR is never auto-approved. The bot still never
+#   gate      verdict drives a BLOCKING review: green=APPROVE, yellow/red=REQUEST_CHANGES
+#             (only a clean green approves). A fork PR is never auto-approved. The bot still never
 #             merges. NOTE: an APPROVE can satisfy branch-protection approval counts
 #             — require a human/CODEOWNERS approval if a person must sign off.
 #   (omitted) fall back to the global REVIEW_ACTIONS default (comment)

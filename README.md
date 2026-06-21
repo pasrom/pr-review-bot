@@ -143,7 +143,7 @@ cursor wraps over the current length.
 | `REPOS_FILE` | `./repos.conf` | rotation list, one `owner/name` per line |
 | `ALL` | `0` | rotation mode: review every listed repo this run |
 | `REVIEW_REQUESTED` | _(unset)_ | **global default** opt-in login (e.g. `@me` = the token account): only review open PRs that request it; unset reviews every open PR. A `repos.conf` 2nd column overrides it per repo (`*` = review all). |
-| `REVIEW_ACTIONS` | `comment` | verdict→action mode. `comment` (default): post a COMMENT only — never approve/block. `gate`: the verdict submits a **blocking** review (green→`APPROVE`, red→`REQUEST_CHANGES`, yellow→`COMMENT`); a fork PR is never auto-approved. A `repos.conf` 3rd column overrides it per repo. Still never merges. |
+| `REVIEW_ACTIONS` | `comment` | verdict→action mode. `comment` (default): post a COMMENT only — never approve/block. `gate`: the verdict submits a **blocking** review (green→`APPROVE`, yellow/red→`REQUEST_CHANGES` — only a clean green approves); a fork PR is never auto-approved. A `repos.conf` 3rd column overrides it per repo. Still never merges. |
 | `SUBAGENTS` | _(unset)_ | space-separated review subagent names for agentic mode |
 | `PROMPT_FILE` | `./reviewer-prompt.md` | reviewer persona (override per target) |
 | `REPO_DIR` | `$STATE_DIR/checkout/<owner__repo>` | self-managed disposable clone (agentic) |

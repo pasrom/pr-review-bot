@@ -60,8 +60,8 @@ guard) `timeout`/`gtimeout`.
 - **Comment-only is the DEFAULT.** Out of the box the verdict drives a COMMENT
   review / issue comment — never `APPROVE`/`REQUEST_CHANGES`. An opt-in, per-repo
   **gate** mode (`REVIEW_ACTIONS=gate`, or a `repos.conf` 3rd column) maps the
-  verdict to a blocking review: green→`APPROVE`, red→`REQUEST_CHANGES`,
-  yellow→`COMMENT`. Gate mode is OFF unless explicitly enabled for a repo, and a
+  verdict to a blocking review: green→`APPROVE`, yellow/red→`REQUEST_CHANGES`
+  (only a clean green approves). Gate mode is OFF unless explicitly enabled for a repo, and a
   typo'd value fails safe to `comment`. Even in gate mode a fork (cross-repository)
   PR is **never auto-APPROVEd** — it downgrades to `COMMENT` (don't rubber-stamp
   untrusted external code). Note: an enabled `APPROVE` can satisfy branch-protection

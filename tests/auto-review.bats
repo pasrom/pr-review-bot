@@ -477,7 +477,7 @@ EOF
   has '"event": "REQUEST_CHANGES"' "$output"
 }
 
-@test "gate mode: yellow verdict stays a COMMENT (neither approve nor block)" {
+@test "gate mode: yellow verdict → REQUEST_CHANGES (any concern blocks)" {
   cat > "$STATE_DIR/meta.json" <<'EOF'
 {"number":22,"title":"x","headRefOid":"cccc111122223333","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
 EOF
@@ -485,9 +485,9 @@ EOF
   ACTIONS_MODE=gate; DRY_RUN=1
   run review_pr 22
   [ "$status" -eq 0 ]
-  has "would post (verdict=yellow)" "$output"
-  has "event=COMMENT" "$output"
-  lacks "would submit" "$output"
+  has "would submit REQUEST_CHANGES" "$output"
+  has '"event": "REQUEST_CHANGES"' "$output"
+  has "event=REQUEST_CHANGES" "$output"
 }
 
 @test "gate mode: a fork PR is never auto-APPROVEd (downgraded to COMMENT)" {
