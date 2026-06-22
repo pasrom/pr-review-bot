@@ -589,14 +589,17 @@ EOF
   has "fixed X in the latest commit" "$(cat "$LAST_PRIOR_FILE")"
 }
 
-@test "prepare_incremental: diverged history (rebase/force-push) → full review" {
+@test "prepare_incremental: diverged history (rebase/force-push) → full diff BUT prior review carried as memory" {
   GH_REPO="owner/repo"; pr=5; sha="def789abc0123456"; short="def789abc012"
   seen='<!-- auto-review v1 | repo=owner/repo | pr=5 | sha=abc123def456 | verdict=red -->'
   echo "diverged" > "$STATE_DIR/cmp_status"
-  gh() { case "$1" in api) cat "$STATE_DIR/cmp_status" ;; pr) echo '{}' ;; esac; }
+  printf '%s' '{"comments":[{"createdAt":"2026-01-01T00:00:00Z","author":{"login":"bot"},"body":"<!-- auto-review v1 | repo=owner/repo | pr=5 | sha=abc123def456 | verdict=red -->\n## Findings\n- please fix X"},{"createdAt":"2026-01-02T00:00:00Z","author":{"login":"alice"},"body":"rebased; fixed X"}],"reviews":[],"author":{"login":"alice"}}' > "$STATE_DIR/prview.json"
+  gh() { case "$1" in api) cat "$STATE_DIR/cmp_status" ;; pr) cat "$STATE_DIR/prview.json" ;; esac; }
   prepare_incremental
-  [ "$INCREMENTAL" -eq 0 ]
-  [ "$PRIOR_SHA" = "" ]
+  [ "$INCREMENTAL" -eq 0 ]                            # full diff — no clean delta across a rebase
+  [ "$PRIOR_SHA" = "abc123def456" ]                  # …but the prior commit is remembered
+  has "please fix X" "$(cat "$LAST_PRIOR_FILE")"      # …and the prior review is carried as memory
+  has "rebased; fixed X" "$(cat "$LAST_PRIOR_FILE")"
 }
 
 @test "prepare_incremental: no prior bot review → full review" {
@@ -663,6 +666,21 @@ EOF
   has "+full diff line" "$out"
   lacks "INCREMENTAL RE-REVIEW" "$out"
   lacks "ONLY the new commits" "$out"
+  lacks "RE-REVIEW after a rebase" "$out"   # no prior → no memory preamble (first review)
+}
+
+@test "build_bundle: post-rebase re-review carries prior memory into the FULL diff" {
+  GH_REPO="owner/repo"; pr=5; DOMAINS=code
+  INCREMENTAL=0; PRIOR_SHA="abc123def456"   # diverged: full diff, but a prior review exists
+  printf '%s\n' "## PRIOR REVIEW you posted (on commit abc123def456)" "- please fix X" > "$LAST_PRIOR_FILE"
+  local meta='{"title":"t","author":{"login":"alice"},"headRefOid":"def789abc0123456","files":[{"path":"a.ts","additions":1,"deletions":0}]}'
+  gh() { case "$1 $2" in "pr checks") echo "(no checks)" ;; "pr diff") printf '%s\n' "diff --git a/a.ts b/a.ts" "+full diff line" ;; *) return 1 ;; esac; }
+  out="$(build_bundle 5 "$meta")"
+  has "RE-REVIEW after a rebase/force-push" "$out"   # the post-rebase preamble fires
+  has "PRIOR REVIEW you posted" "$out"               # memory is carried in
+  has "+full diff line" "$out"                       # …into the FULL diff (gh pr diff, not the compare API)
+  lacks "INCREMENTAL RE-REVIEW" "$out"               # not the delta path
+  lacks "ONLY the new commits" "$out"
 }
 
 @test "review_pr: incremental end-to-end — prior marker drives a delta review + base= in the marker (DRY_RUN)" {
@@ -700,4 +718,42 @@ EOF
   has "base=abc123def456" "$output"
   has 'Scope:** incremental' "$output"
   has 'from `abc123def456` to `def789abc012`' "$output"
+}
+
+@test "review_pr: post-rebase end-to-end — diverged history → full review carrying prior memory + 'rebased' scope (DRY_RUN)" {
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":31,"title":"x","headRefOid":"def789abc0123456","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
+EOF
+  # Prior bot review on an older commit; head was rebased → compare status diverged.
+  echo "<!-- auto-review v1 | repo=owner/repo | pr=31 | sha=abc123def456 | verdict=red | event=COMMENT -->" > "$STATE_DIR/prior"
+  echo "diverged" > "$STATE_DIR/cmp_status"
+  printf '%s' '{"comments":[{"createdAt":"2026-01-01T00:00:00Z","author":{"login":"bot"},"body":"<!-- auto-review v1 | repo=owner/repo | pr=31 | sha=abc123def456 | verdict=red -->\n- fix X"}],"reviews":[],"author":{"login":"alice"}}' > "$STATE_DIR/prview.json"
+  gh() {
+    case "$1" in
+      api) cat "$STATE_DIR/cmp_status" ;;   # only the compare --jq status is hit (no delta diff on diverged)
+      pr)
+        case "$2" in
+          view)
+            if [[ "$*" == *"comments,reviews,author"* ]]; then cat "$STATE_DIR/prview.json"
+            elif [[ "$*" == *"comments,reviews"* ]]; then cat "$STATE_DIR/prior"
+            else cat "$STATE_DIR/meta.json"; fi ;;
+          checks)   echo "(no checks reported)" ;;
+          diff)     printf '%s\n' "diff --git a/src/util.ts b/src/util.ts" "@@ -1 +1,2 @@" "+full change" ;;
+          checkout) : ;;
+          comment)  echo "SHOULD-NOT-POST" >&2; return 1 ;;
+          *) echo "UNHANDLED gh pr $2" >&2; return 1 ;;
+        esac ;;
+      repo) [[ "$2" == clone ]] && mkdir -p "$4/.git" ;;
+      *) echo "UNHANDLED gh $1" >&2; return 1 ;;
+    esac
+  }
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: green\n\n## Summary\nall prior points resolved","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  DRY_RUN=1
+  run review_pr 31
+  [ "$status" -eq 0 ]
+  has "history diverged from abc123def456" "$output"               # full review, not incremental
+  has "re-review after a rebase" "$output"                         # visible scope line explains it
+  has 'prior review of `abc123def456` is carried as context' "$output"
+  has "base=rebased:abc123def456" "$output"                        # marker records the carried-prior base
+  lacks "Scope:** incremental" "$output"
 }
