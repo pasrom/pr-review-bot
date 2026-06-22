@@ -41,10 +41,25 @@ gh() {
     "pr view")
       if [[ "$*" == *"comments,reviews"* ]]; then cat "$STATE_DIR/prior"
       else cat "$STATE_DIR/meta.json"; fi ;;
-    "pr checks")  echo "(no checks reported)" ;;
-    "pr diff")    printf '%s\n' 'diff --git a/src/util.ts b/src/util.ts' '@@ -1 +1,2 @@' '+const x = 1;' ;;
-    "pr comment") echo "SHOULD-NOT-POST-IN-DRY-RUN" >&2; return 1 ;;
+    "pr checks")   echo "(no checks reported)" ;;
+    "pr diff")     printf '%s\n' 'diff --git a/src/util.ts b/src/util.ts' '@@ -1 +1,2 @@' '+const x = 1;' ;;
+    "pr checkout") : ;;                  # agentic checkout (stubbed; no network)
+    "pr comment")  echo "SHOULD-NOT-POST-IN-DRY-RUN" >&2; return 1 ;;
+    "repo clone")  mkdir -p "$4/.git" ;; # agentic clone (stubbed; $4 = target dir)
     *) echo "UNHANDLED gh $*" >&2; return 1 ;;
+  esac
+}
+
+# git stub for agentic mode: review_agentic's checkout subshell runs
+# `git config`/`git fetch` and verifies `git rev-parse HEAD` == the PR head.
+# Return the head straight from the meta fixture so the checkout always
+# "matches" — no network, no real clone. Code PRs now route agentic by default,
+# so most review_pr e2e tests flow through this.
+git() {
+  case "$1" in
+    config|fetch) : ;;
+    rev-parse)    jq -r '.headRefOid' "$STATE_DIR/meta.json" ;;
+    *)            command git "$@" ;;
   esac
 }
 
@@ -88,9 +103,9 @@ lacks() { case "$2" in *"$1"*) printf 'assert lacks: unexpected >>%s<<\n' "$1" >
   [ "$MODE" = agentic ]
 }
 
-@test "route: plain code (.ts) → digest/mid/code" {
+@test "route: plain code (.ts) → agentic/mid/code (repo-aware, can verify out-of-delta refs)" {
   route "alice" "src/util.ts"
-  [ "$MODE" = digest ]
+  [ "$MODE" = agentic ]
   [ "$MODEL" = "$MODEL_MID" ]
   [ "$DOMAINS" = code ]
 }
@@ -302,7 +317,7 @@ EOF
 
 # ── review_pr() — digest end-to-end (mocked gh + claude, DRY_RUN) ────────────
 
-@test "review_pr: digest DRY_RUN builds a marker'd comment and posts nothing" {
+@test "review_pr: code PR → agentic (clone+checkout stubbed) builds a marker'd comment and posts nothing (DRY_RUN)" {
   cat > "$STATE_DIR/meta.json" <<'EOF'
 {"number":5,"title":"add helper","headRefOid":"abcdef1234567890","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":10,"deletions":2}]}
 EOF
@@ -314,8 +329,31 @@ EOF
   has "DRY_RUN — would post (verdict=yellow)" "$output"
   has "<!-- auto-review v1 | repo=owner/repo | pr=5 | sha=abcdef123456" "$output"
   has "verdict=yellow" "$output"
-  has "mode=digest" "$output"
+  has "mode=agentic" "$output"
   has "full PR diff, at head" "$output"
+}
+
+@test "review_pr: agentic clone failure falls back to digest AND the marker says mode=digest (honest fallback)" {
+  # A code PR routes agentic, but if the clone fails review_agentic falls back to
+  # digest — the marker must then report digest, not the routed-but-unused agentic.
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":9,"title":"x","headRefOid":"9999000011112222","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
+EOF
+  gh() {
+    case "$1 $2" in
+      "pr view")    if [[ "$*" == *"comments,reviews"* ]]; then cat "$STATE_DIR/prior"; else cat "$STATE_DIR/meta.json"; fi ;;
+      "pr checks")  echo "(no checks reported)" ;;
+      "pr diff")    printf '%s\n' 'diff --git a/src/util.ts b/src/util.ts' '@@ -1 +1,2 @@' '+const x = 1;' ;;
+      "repo clone") return 1 ;;   # clone fails → review_agentic must fall back to digest
+      *) echo "UNHANDLED gh $*" >&2; return 1 ;;
+    esac
+  }
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: green\n\n## Summary\nok","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  DRY_RUN=1
+  run review_pr 9
+  [ "$status" -eq 0 ]
+  has "clone failed — falling back to digest mode" "$output"
+  has "mode=digest" "$output"
 }
 
 @test "review_pr: skips a draft PR" {
@@ -642,10 +680,12 @@ EOF
             if [[ "$*" == *"comments,reviews,author"* ]]; then cat "$STATE_DIR/prview.json"
             elif [[ "$*" == *"comments,reviews"* ]]; then cat "$STATE_DIR/prior"
             else cat "$STATE_DIR/meta.json"; fi ;;
-          checks)  echo "(no checks reported)" ;;
-          comment) echo "SHOULD-NOT-POST" >&2; return 1 ;;
+          checks)   echo "(no checks reported)" ;;
+          checkout) : ;;                          # agentic checkout (stubbed)
+          comment)  echo "SHOULD-NOT-POST" >&2; return 1 ;;
           *) echo "UNHANDLED gh pr $2" >&2; return 1 ;;
         esac ;;
+      repo) [[ "$2" == clone ]] && mkdir -p "$4/.git" ;;  # agentic clone (stubbed)
       *) echo "UNHANDLED gh $1" >&2; return 1 ;;
     esac
   }

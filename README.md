@@ -33,17 +33,23 @@ fewer tokens, reproducible, and debuggable without the model:
    | --- | --- | --- |
    | bot author (`*[bot]`, dependabot) | `digest` | Haiku |
    | docs / config / styling only | `digest` | Haiku |
-   | general code (`.ts/.py/.go/.rs/.sql/…`) | `digest` | Sonnet |
+   | general code (`.ts/.py/.go/.rs/.sql/…`) | `agentic` | Sonnet |
    | security-sensitive (`auth`/`login`/`crypto`/`secret`/`token`/migrations/`Dockerfile`/CI/`payment`/`webhook`) | `agentic` | Opus |
+   | any fork PR (regardless of paths) | `digest` | _(forced — never checks out untrusted code)_ |
 
    The heuristics are generic and language-agnostic; edit `route()` to taste.
+   Any same-repo change that touches code gets the repo-aware `agentic` pass so
+   the model can verify references the diff alone can't (out-of-delta callers,
+   shared helpers); only docs/dep-bumps and forks stay on the cheap `digest`.
 
 5. **Review**:
    - `digest` — a pre-built bundle (diff + CI status) is piped to a sandboxed
-     `claude -p` with no tools. Cheap, fixed cost.
+     `claude -p` with no tools. Cheap, fixed cost. Used for docs/dep-bumps and
+     all fork PRs.
    - `agentic` — the PR branch is checked out and the model reads across the repo
      (`Read`/`Grep`/`Glob`) to verify the diff against the real code. Optionally
-     uses review subagents named in `SUBAGENTS`. Reserved for sensitive changes.
+     uses review subagents named in `SUBAGENTS`. The default for any same-repo
+     code change; security-sensitive paths additionally use the deep model.
 6. **Validate** — the output is hard-checked against the contract (below) before
    anything is posted. On a violation it retries once with a corrective hint; if
    it still doesn't conform, nothing is posted and it's logged. Since no marker
@@ -99,7 +105,7 @@ sentinel-delimited JSON array (`@@INLINE@@ … @@END_INLINE@@`) of
 
 If no inline comments survive (or in digest mode), it falls back to a single
 summary issue comment. Inline is capped (≤10) and reserved for agentic mode;
-digest mode (bot bumps / docs / general code) stays summary-only.
+digest mode (bot bumps / docs / forks) stays summary-only.
 
 ### Incremental re-review (memory)
 
@@ -268,8 +274,10 @@ the macOS system bash the bot runs on in production, catching 3.2-only regressio
   is a pre-review comment or a verdict-driven approval/change-request), so it
   can't be mistaken for a human judgment.
 - **English, no internal tool/agent names** in the public comment.
-- **Cost is gated by risk** — only security-sensitive touchpoints get the
-  expensive agentic pass; the routine majority runs cheap.
+- **Cost is gated by risk** — docs, dep-bumps, and forks run the cheap no-tools
+  digest; same-repo code gets the repo-aware agentic pass (so the model can
+  verify out-of-delta references), with the deep model reserved for
+  security-sensitive paths.
 - **Fork PRs never get checked out.** A cross-repository (fork) PR is
   attacker-controlled, so it is forced to the no-tools digest pass regardless of
   the paths it touches. Agentic mode (which checks out the branch) only ever

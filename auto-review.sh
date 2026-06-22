@@ -14,10 +14,14 @@
 #   - Two modes, chosen per-PR by the path router:
 #       * digest   — pipe a pre-built bundle (diff + CI status) to a sandboxed
 #                    `claude -p` (no tools). Cheap, fixed cost. Used for bot
-#                    bumps, docs, and general code.
+#                    bumps, docs/config-only changes, and ALL fork PRs (never
+#                    check out untrusted code).
 #       * agentic  — check out the PR branch and let the model read across the
-#                    repo (Read/Grep/Glob). Reserved for security-sensitive
-#                    changes. Read-only by construction (no Bash, no edits).
+#                    repo (Read/Grep/Glob). The default for any same-repo change
+#                    that touches code, so the model can verify references the
+#                    diff alone can't (out-of-delta callers, shared helpers);
+#                    security-sensitive paths additionally use the deep model.
+#                    Read-only by construction (no Bash, no edits).
 #   - Output contract: stdout is `VERDICT: green|yellow|red`, a blank line, then
 #     the markdown body. The script wraps it with a hidden marker (dedup +
 #     verdict routing) and a bot banner, then posts it.
@@ -190,9 +194,14 @@ route() {
     return
   fi
 
-  # Otherwise digest. Code files → mid model; docs/config/styling only → cheap.
+  # Real code → repo-aware (agentic) review at the mid model. The model can
+  # Read/Grep across the checked-out tree to verify references the diff alone
+  # can't — e.g. a shared helper an unchanged caller relies on, the out-of-delta
+  # blind spot a diff-only digest cannot resolve. Forks are forced back to
+  # digest downstream (never check out untrusted code). Docs/config/styling only
+  # → the cheap no-tools digest (nothing to cross-verify against the repo).
   if grep -qiE '\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|rb|php|c|cc|cpp|h|hpp|cs|swift|sql|prisma)$' <<<"$files"; then
-    DOMAINS="code"; MODEL="$MODEL_MID"
+    MODE="agentic"; DOMAINS="code"; MODEL="$MODEL_MID"
   else
     DOMAINS="docs"; MODEL="$MODEL_CHEAP"
   fi
@@ -495,6 +504,17 @@ review_pr() {
     fi
     log "$GH_REPO #$pr: retry produced a valid review"
   fi
+
+  # run_model ran in a command-substitution subshell, so a fallback inside
+  # review_agentic (clone/checkout failed → review_digest) cannot propagate MODE
+  # back to this shell. Re-derive the mode that ACTUALLY ran from the invocation
+  # line the chosen function wrote to disk ("agentic | …" or "digest | …"), so
+  # the inline gate below and the posted marker reflect reality — not a
+  # routed-but-unused agentic.
+  case "$(cut -d' ' -f1 "$LAST_INVOCATION_FILE" 2>/dev/null || true)" in
+    agentic) MODE="agentic" ;;
+    digest)  MODE="digest" ;;
+  esac
 
   local verdict body
   verdict="$(printf '%s\n' "$raw" | parse_verdict)"; verdict="${verdict:-yellow}"

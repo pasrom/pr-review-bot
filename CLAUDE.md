@@ -36,8 +36,11 @@ guard) `timeout`/`gtimeout`.
   without invoking the model.
 - **Two modes**, chosen per-PR by `route()` from author + changed paths (zero
   tokens): `digest` (bundle piped to a sandboxed `claude -p`, NO tools) and
-  `agentic` (checks out the branch, `Read`/`Grep`/`Glob` only). Model per risk:
-  Haiku / Sonnet / Opus.
+  `agentic` (checks out the branch, `Read`/`Grep`/`Glob` only). Any same-repo
+  code change defaults to `agentic` so the model can verify references the diff
+  alone can't (out-of-delta callers, shared helpers); docs/dep-bumps and **all
+  fork PRs** stay on `digest`. Model per risk: Haiku (bot/docs) / Sonnet (code) /
+  Opus (security-sensitive).
 - **Output contract:** the model must emit `VERDICT: green|yellow|red`, a blank
   line, then a markdown body with `## ` sections. `is_valid_review()` HARD-
   validates this before posting; on failure it retries once with a corrective
