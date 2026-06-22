@@ -540,16 +540,21 @@ review_pr() {
   fi
 
   # Verdict -> review event. Default ("comment" mode): always COMMENT — the bot
-  # advises, a human decides. In per-repo "gate" mode the verdict drives a
-  # blocking review: green->APPROVE, yellow/red->REQUEST_CHANGES (only a clean
-  # green approves; any concern requests changes).
+  # advises, a human decides. In per-repo "gate" mode the verdict drives the
+  # review event: green->APPROVE, red->REQUEST_CHANGES. YELLOW stays COMMENT on
+  # purpose — a yellow is a concern the model often cannot fully verify (e.g. an
+  # out-of-delta reference it flags for a human), so it advises without blocking;
+  # only a hard red blocks the merge. (This deliberately reverses the earlier
+  # "any concern blocks" behaviour, which trapped such unverifiable findings in a
+  # re-review loop: human verifies → approves → next commit re-flags → blocks.)
   # Safety: never auto-APPROVE a fork PR (don't rubber-stamp untrusted external
   # code) — downgrade it to COMMENT. REQUEST_CHANGES on a fork is fine.
   local event="COMMENT"
   if [[ "${ACTIONS_MODE:-comment}" == "gate" ]]; then
     case "$verdict" in
-      green)      event="APPROVE" ;;
-      yellow|red) event="REQUEST_CHANGES" ;;
+      green) event="APPROVE" ;;
+      red)   event="REQUEST_CHANGES" ;;
+      # yellow → COMMENT (advises, does not block)
     esac
     if [[ "$event" == "APPROVE" && "$fork" == "true" ]]; then
       event="COMMENT"

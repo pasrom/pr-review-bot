@@ -516,7 +516,10 @@ EOF
   has '"event": "REQUEST_CHANGES"' "$output"
 }
 
-@test "gate mode: yellow verdict → REQUEST_CHANGES (any concern blocks)" {
+@test "gate mode: yellow verdict → COMMENT (advises, does not block — only red blocks)" {
+  # A yellow is often a concern the model can't fully verify (e.g. an out-of-delta
+  # reference). In gate mode it COMMENTs (advises) instead of blocking, so such a
+  # finding can't trap the PR in a re-review loop; only a hard red requests changes.
   cat > "$STATE_DIR/meta.json" <<'EOF'
 {"number":22,"title":"x","headRefOid":"cccc111122223333","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
 EOF
@@ -524,9 +527,9 @@ EOF
   ACTIONS_MODE=gate; DRY_RUN=1
   run review_pr 22
   [ "$status" -eq 0 ]
-  has "would submit REQUEST_CHANGES" "$output"
-  has '"event": "REQUEST_CHANGES"' "$output"
-  has "event=REQUEST_CHANGES" "$output"
+  has "would post (verdict=yellow)" "$output"
+  has "event=COMMENT" "$output"
+  lacks "would submit" "$output"
 }
 
 @test "gate mode: a fork PR is never auto-APPROVEd (downgraded to COMMENT)" {
