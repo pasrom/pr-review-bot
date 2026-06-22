@@ -79,6 +79,17 @@ guard) `timeout`/`gtimeout`.
 - **Untrusted PR content is fenced** as DATA in the bundle; the persona forbids
   following instructions embedded in PR text. Dedup matches the full marker
   prefix (and optionally a trusted `BOT_LOGIN`) to resist skip-marker spoofing.
+- **Incremental review reads untrusted author content.** On re-review it feeds
+  the author's PR responses to the model as memory — these stay inside the fenced
+  DATA block (never the trusted preamble), and the instruction tells the model to
+  treat a point as resolved only when the diff actually shows the fix (verify, not
+  obey) and never to change its verdict on PR-content instruction. The delta is the
+  GitHub compare API (`base...head`), used only for a clean fast-forward; a
+  rebase/force-push (diverged) or first review falls back to a full review. The
+  prior base SHA is read by matching the FULL bot-marker prefix (not a bare
+  `sha=`), so PR content can't inject a base; and because a wrong base in gate mode
+  could hide commits from an auto-APPROVE, **incremental gating requires `BOT_LOGIN`**
+  (gate + unset BOT_LOGIN → full review).
 - **Tokens/secrets** live only in the launchd env; never log or post them. Use a
   fine-grained `GH_TOKEN` scoped to the target repos, not classic `repo`.
 

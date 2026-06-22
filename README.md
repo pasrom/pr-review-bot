@@ -69,8 +69,13 @@ then wraps the body and prepends a hidden HTML marker that is invisible in the
 rendered comment but drives **dedup**, **verdict routing**, and **logging**:
 
 ```
-<!-- auto-review v1 | repo=owner/name | pr=128 | sha=abc123def456 | verdict=yellow | model=claude-haiku-4-5 | mode=digest | domains=deps | inline=0 -->
+<!-- auto-review v1 | repo=owner/name | pr=128 | sha=abc123def456 | verdict=yellow | event=COMMENT | model=claude-haiku-4-5 | mode=digest | domains=deps | inline=0 | base=full -->
 ```
+
+`event` is the review action (`COMMENT`, or `APPROVE`/`REQUEST_CHANGES` in gate
+mode); `base` is the commit this review was diffed against (`full` for a whole-PR
+review, or the prior head SHA for an [incremental](#incremental-re-review-memory)
+re-review).
 
 The reviewer persona lives in `reviewer-prompt.md` — it is a generic
 senior-engineer review prompt. Edit it, or point `PROMPT_FILE` at a custom one
@@ -95,6 +100,30 @@ sentinel-delimited JSON array (`@@INLINE@@ … @@END_INLINE@@`) of
 If no inline comments survive (or in digest mode), it falls back to a single
 summary issue comment. Inline is capped (≤10) and reserved for agentic mode;
 digest mode (bot bumps / docs / general code) stays summary-only.
+
+### Incremental re-review (memory)
+
+The bot only re-reviews when a **new commit** lands (SHA-pinned dedup). When it
+does, it reviews **only the new commits since its last review** rather than the
+whole PR again (`INCREMENTAL_REVIEW=1`, the default). It feeds the model its own
+prior review plus the **author's responses** as context, and instructs it to drop
+points the new diff actually fixes or the author concretely explains — and to
+*verify against the diff*, never to drop a real issue on a mere assertion. This
+keeps re-reviews focused on what changed and stops the same points cycling
+forever; if the new commits resolve everything, the verdict can go green (and, in
+gate mode, flip a prior REQUEST_CHANGES to APPROVE — the PR "heals"). The last
+reviewed commit is read from the prior comment's hidden marker (`sha=…`), and the
+delta is fetched via the GitHub compare API (no clone needed). It falls back to a
+full review on the first review and on a rebase/force-push (diverged history).
+
+The author's responses are untrusted and stay inside the fenced DATA block. The
+prior SHA is read by matching the **full** bot-marker prefix (not a bare `sha=`),
+so PR text can't inject a base. In **gate mode** this matters more (a wrong base
+could hide commits from an auto-APPROVE), so incremental gating requires
+**`BOT_LOGIN`** to be set — with it unset, a gate-mode repo falls back to a full
+review. Inline (line-level) comments are still anchor-validated against the **full
+PR diff** (what GitHub's Reviews API accepts), even though the model reviews only
+the delta — a delta line GitHub wouldn't accept simply falls back to the summary.
 
 ## Usage
 
@@ -144,6 +173,7 @@ cursor wraps over the current length.
 | `ALL` | `0` | rotation mode: review every listed repo this run |
 | `REVIEW_REQUESTED` | _(unset)_ | **global default** opt-in login (e.g. `@me` = the token account): only review open PRs that request it; unset reviews every open PR. A `repos.conf` 2nd column overrides it per repo (`*` = review all). |
 | `REVIEW_ACTIONS` | `comment` | verdict→action mode. `comment` (default): post a COMMENT only — never approve/block. `gate`: the verdict submits a **blocking** review (green→`APPROVE`, yellow/red→`REQUEST_CHANGES` — only a clean green approves); a fork PR is never auto-approved. A `repos.conf` 3rd column overrides it per repo. Still never merges. |
+| `INCREMENTAL_REVIEW` | `1` | on re-review (the bot already reviewed an earlier commit of this PR), review only the **new commits** since then — feeding the prior review + the author's responses as memory, so addressed/explained points aren't re-raised (no endless back-and-forth). `0` = always full review. Falls back to a full review on the first review or a rebase/force-push (diverged history). |
 | `SUBAGENTS` | _(unset)_ | space-separated review subagent names for agentic mode |
 | `PROMPT_FILE` | `./reviewer-prompt.md` | reviewer persona (override per target) |
 | `REPO_DIR` | `$STATE_DIR/checkout/<owner__repo>` | self-managed disposable clone (agentic) |

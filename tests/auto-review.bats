@@ -531,3 +531,127 @@ EOF
   lacks "would submit APPROVE" "$output"
   has "event=COMMENT" "$output"
 }
+
+# ── incremental review (only the delta since the bot's last review, with memory) ─
+
+@test "prepare_incremental: a fast-forward → incremental, captures prior review + author response" {
+  GH_REPO="owner/repo"; pr=5; sha="def789abc0123456"; short="def789abc012"
+  seen='<!-- auto-review v1 | repo=owner/repo | pr=5 | sha=abc123def456 | verdict=red | event=COMMENT -->'
+  printf '%s' '{"comments":[{"createdAt":"2026-01-01T00:00:00Z","author":{"login":"bot"},"body":"<!-- auto-review v1 | repo=owner/repo | pr=5 | sha=abc123def456 | verdict=red -->\n## Findings\n- please fix X"},{"createdAt":"2026-01-02T00:00:00Z","author":{"login":"alice"},"body":"fixed X in the latest commit"}],"reviews":[],"author":{"login":"alice"}}' > "$STATE_DIR/prview.json"
+  echo "ahead" > "$STATE_DIR/cmp_status"
+  gh() { case "$1" in api) cat "$STATE_DIR/cmp_status" ;; pr) cat "$STATE_DIR/prview.json" ;; esac; }
+  prepare_incremental
+  [ "$INCREMENTAL" -eq 1 ]
+  [ "$PRIOR_SHA" = "abc123def456" ]
+  has "please fix X" "$(cat "$LAST_PRIOR_FILE")"
+  has "fixed X in the latest commit" "$(cat "$LAST_PRIOR_FILE")"
+}
+
+@test "prepare_incremental: diverged history (rebase/force-push) → full review" {
+  GH_REPO="owner/repo"; pr=5; sha="def789abc0123456"; short="def789abc012"
+  seen='<!-- auto-review v1 | repo=owner/repo | pr=5 | sha=abc123def456 | verdict=red -->'
+  echo "diverged" > "$STATE_DIR/cmp_status"
+  gh() { case "$1" in api) cat "$STATE_DIR/cmp_status" ;; pr) echo '{}' ;; esac; }
+  prepare_incremental
+  [ "$INCREMENTAL" -eq 0 ]
+  [ "$PRIOR_SHA" = "" ]
+}
+
+@test "prepare_incremental: no prior bot review → full review" {
+  GH_REPO="owner/repo"; pr=5; sha="def789abc0123456"; short="def789abc012"
+  seen=""
+  prepare_incremental
+  [ "$INCREMENTAL" -eq 0 ]
+}
+
+@test "prepare_incremental: toggle off → full review even with a prior" {
+  GH_REPO="owner/repo"; pr=5; sha="def789abc0123456"; short="def789abc012"
+  seen='<!-- auto-review v1 | repo=owner/repo | pr=5 | sha=abc123def456 | verdict=red -->'
+  INCREMENTAL_REVIEW=0
+  # Stub a valid "ahead" prior so the ONLY thing keeping INCREMENTAL=0 is the toggle
+  # (otherwise the test would pass even if the toggle guard were removed).
+  echo "ahead" > "$STATE_DIR/cmp_status"
+  printf '%s' '{"comments":[],"reviews":[],"author":{"login":"alice"}}' > "$STATE_DIR/prview.json"
+  gh() { case "$1" in api) cat "$STATE_DIR/cmp_status" ;; pr) cat "$STATE_DIR/prview.json" ;; esac; }
+  prepare_incremental
+  [ "$INCREMENTAL" -eq 0 ]
+}
+
+@test "prepare_incremental: a bare author 'sha=' (no full bot marker) does not drive incremental (anti-spoof)" {
+  GH_REPO="owner/repo"; pr=5; sha="def789abc0123456"; short="def789abc012"
+  # Untrusted author text with a bare sha= token but NO full bot marker.
+  seen='rebased onto sha=deadbeef1234, please re-review'
+  prepare_incremental
+  [ "$INCREMENTAL" -eq 0 ]
+  [ "$PRIOR_SHA" = "" ]
+}
+
+@test "prepare_incremental: gate mode without BOT_LOGIN forces a full review (anti-spoof)" {
+  GH_REPO="owner/repo"; pr=5; sha="def789abc0123456"; short="def789abc012"
+  seen='<!-- auto-review v1 | repo=owner/repo | pr=5 | sha=abc123def456 | verdict=red -->'
+  ACTIONS_MODE=gate; BOT_LOGIN=""
+  # A valid "ahead" prior is stubbed; only the gate+no-BOT_LOGIN guard should keep
+  # INCREMENTAL=0 (without it, the prior would drive an incremental review).
+  echo "ahead" > "$STATE_DIR/cmp_status"
+  printf '%s' '{"comments":[],"reviews":[],"author":{"login":"alice"}}' > "$STATE_DIR/prview.json"
+  gh() { case "$1" in api) cat "$STATE_DIR/cmp_status" ;; pr) cat "$STATE_DIR/prview.json" ;; esac; }
+  prepare_incremental
+  [ "$INCREMENTAL" -eq 0 ]
+}
+
+@test "build_bundle: incremental mode carries the prior-review memory + only the delta diff" {
+  GH_REPO="owner/repo"; pr=5; DOMAINS=code
+  INCREMENTAL=1; PRIOR_SHA="abc123def456"
+  printf '%s\n' "## PRIOR REVIEW you posted (on commit abc123def456)" "- author said: fixed X" > "$LAST_PRIOR_FILE"
+  printf '%s\n' "diff --git a/new.ts b/new.ts" "@@ -1 +1,2 @@" "+only the new change" > "$STATE_DIR/cmp_diff"
+  local meta='{"title":"t","author":{"login":"alice"},"headRefOid":"def789abc0123456","files":[{"path":"new.ts","additions":1,"deletions":0}]}'
+  gh() { case "$1" in api) cat "$STATE_DIR/cmp_diff" ;; pr) echo "(no checks reported)" ;; esac; }
+  out="$(build_bundle 5 "$meta")"
+  has "INCREMENTAL RE-REVIEW" "$out"
+  has "PRIOR REVIEW you posted" "$out"
+  has "ONLY the new commits since abc123def456" "$out"
+  has "+only the new change" "$out"
+}
+
+@test "build_bundle: non-incremental mode uses the full PR diff (unchanged default)" {
+  GH_REPO="owner/repo"; pr=5; DOMAINS=code; INCREMENTAL=0
+  local meta='{"title":"t","author":{"login":"alice"},"headRefOid":"def789abc0123456","files":[{"path":"a.ts","additions":1,"deletions":0}]}'
+  gh() { case "$1 $2" in "pr checks") echo "(no checks)" ;; "pr diff") printf '%s\n' "diff --git a/a.ts b/a.ts" "+full diff line" ;; *) return 1 ;; esac; }
+  out="$(build_bundle 5 "$meta")"
+  has "+full diff line" "$out"
+  lacks "INCREMENTAL RE-REVIEW" "$out"
+  lacks "ONLY the new commits" "$out"
+}
+
+@test "review_pr: incremental end-to-end — prior marker drives a delta review + base= in the marker (DRY_RUN)" {
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":30,"title":"x","headRefOid":"def789abc0123456","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
+EOF
+  # A prior bot review on an OLDER commit; current head differs → not deduped.
+  echo "<!-- auto-review v1 | repo=owner/repo | pr=30 | sha=abc123def456 | verdict=red | event=COMMENT -->" > "$STATE_DIR/prior"
+  echo "ahead" > "$STATE_DIR/cmp_status"
+  printf '%s' '{"comments":[{"createdAt":"2026-01-01T00:00:00Z","author":{"login":"bot"},"body":"<!-- auto-review v1 | repo=owner/repo | pr=30 | sha=abc123def456 | verdict=red -->\n- fix X"}],"reviews":[],"author":{"login":"alice"}}' > "$STATE_DIR/prview.json"
+  printf '%s\n' "diff --git a/src/util.ts b/src/util.ts" "@@ -1 +1,2 @@" "+delta change" > "$STATE_DIR/cmp_diff"
+  gh() {
+    case "$1" in
+      api) if [[ "$*" == *"--jq"* ]]; then cat "$STATE_DIR/cmp_status"; else cat "$STATE_DIR/cmp_diff"; fi ;;
+      pr)
+        case "$2" in
+          view)
+            if [[ "$*" == *"comments,reviews,author"* ]]; then cat "$STATE_DIR/prview.json"
+            elif [[ "$*" == *"comments,reviews"* ]]; then cat "$STATE_DIR/prior"
+            else cat "$STATE_DIR/meta.json"; fi ;;
+          checks)  echo "(no checks reported)" ;;
+          comment) echo "SHOULD-NOT-POST" >&2; return 1 ;;
+          *) echo "UNHANDLED gh pr $2" >&2; return 1 ;;
+        esac ;;
+      *) echo "UNHANDLED gh $1" >&2; return 1 ;;
+    esac
+  }
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: green\n\n## Summary\nresolved","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  DRY_RUN=1
+  run review_pr 30
+  [ "$status" -eq 0 ]
+  has "incremental review — only changes since abc123def456" "$output"
+  has "base=abc123def456" "$output"
+}
