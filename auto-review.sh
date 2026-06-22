@@ -440,12 +440,22 @@ prepare_incremental() {
 
 # ── CI status classifier ─────────────────────────────────────────────────────
 # Collapse the PR's status-check rollup to ONE word: passed | failed | pending |
-# none. Used to defer the review while CI is still settling (so it reviews
-# against real results instead of falsely flagging "no CI") and to never
-# auto-APPROVE a PR whose CI is red. Uses $GH_REPO. arg: pr.
+# none | unknown (= the query itself failed, e.g. the token can't read checks).
+# Used to defer the review while CI is still settling (so it reviews against real
+# results instead of falsely flagging "no CI") and to never auto-APPROVE a PR
+# whose CI is red. Uses $GH_REPO. arg: pr.
 ci_state() {
   local roll
-  roll="$(gh pr view "$1" -R "$GH_REPO" --json statusCheckRollup -q '.statusCheckRollup' 2>/dev/null || true)"
+  # A FAILED query (e.g. the token can't read checks → GraphQL "Resource not
+  # accessible" / REST 403) is NOT the same as "no checks": report it as
+  # 'unknown' so the caller neither defers forever nor posts a false "no CI".
+  # Relies on gh exiting non-zero on the error (holds for a 403 / hard GraphQL
+  # error). A hypothetical silent HTTP-200 partial error (exit 0, field null)
+  # would fall through to 'none' — an accepted, gh-version-dependent edge; note
+  # null is also the legitimate "no checks" value, so it can't be remapped.
+  if ! roll="$(gh pr view "$1" -R "$GH_REPO" --json statusCheckRollup -q '.statusCheckRollup' 2>/dev/null)"; then
+    echo unknown; return
+  fi
   [[ -n "$roll" && "$roll" != "null" ]] || roll='[]'
   printf '%s' "$roll" | jq -r '
     map({ s: ((.status // .state // "") | ascii_upcase),
@@ -453,7 +463,7 @@ ci_state() {
     | if   length == 0 then "none"
       elif any(.s=="QUEUED" or .s=="IN_PROGRESS" or .s=="PENDING" or .s=="EXPECTED" or .s=="WAITING") then "pending"
       elif any(.c=="FAILURE" or .c=="TIMED_OUT" or .c=="CANCELLED" or .c=="ERROR" or .c=="STARTUP_FAILURE" or .c=="ACTION_REQUIRED" or .s=="FAILURE" or .s=="ERROR") then "failed"
-      else "passed" end' 2>/dev/null || echo none
+      else "passed" end' 2>/dev/null || echo unknown
 }
 
 # ── Review one PR (uses the current $GH_REPO) ────────────────────────────────
@@ -522,6 +532,11 @@ review_pr() {
         fi
         log "$GH_REPO #$pr: CI still '$CI_STATE' after $CI_DEFER_MAX defers — reviewing anyway"
       fi
+      ;;
+    unknown)
+      # The query failed (token can't read checks) — deferring would never help.
+      # Review now WITHOUT CI awareness; the bundle tells the model CI isn't visible.
+      log "$GH_REPO #$pr: CI status not readable (token may lack checks read) — reviewing without CI awareness"
       ;;
   esac
   rm -f "$cidefer"   # proceeding to review → clear this head's defer counter
@@ -733,10 +748,15 @@ build_bundle() {
     cat "$LAST_PRIOR_FILE"
     echo
   fi
-  echo "## CI status: ${CI_STATE:-unknown}"
-  gh pr checks "$pr" -R "$GH_REPO" 2>/dev/null || echo "(no checks reported)"
-  if [[ "${CI_STATE:-}" == "failed" ]]; then
-    echo "(CI is FAILING — treat this as a real blocker, not a nitpick.)"
+  if [[ "${CI_STATE:-}" == "unknown" ]]; then
+    echo "## CI status: not visible to this reviewer (the bot's token cannot read checks here)."
+    echo "Do NOT treat this as missing CI and do NOT comment on CI passing or failing — it is simply not visible to you."
+  else
+    echo "## CI status: ${CI_STATE:-unknown}"
+    gh pr checks "$pr" -R "$GH_REPO" 2>/dev/null || echo "(no checks reported)"
+    if [[ "${CI_STATE:-}" == "failed" ]]; then
+      echo "(CI is FAILING — treat this as a real blocker, not a nitpick.)"
+    fi
   fi
   echo
   echo "## Changed files"

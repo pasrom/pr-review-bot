@@ -159,6 +159,11 @@ lacks() { case "$2" in *"$1"*) printf 'assert lacks: unexpected >>%s<<\n' "$1" >
   gh() { printf '%s' 'null'; }
   [ "$(ci_state 1)" = none ]
 }
+@test "ci_state: a failed query (token cannot read checks) → unknown (not none)" {
+  GH_REPO="owner/repo"
+  gh() { return 1; }   # e.g. GraphQL "Resource not accessible" / REST 403
+  [ "$(ci_state 1)" = unknown ]
+}
 
 # ── parse_verdict / is_valid_review / parse_body ─────────────────────────────
 
@@ -657,6 +662,33 @@ EOF
   lacks "would submit APPROVE" "$output"
 }
 
+@test "review_pr: unreadable CI (token can't read checks) → reviews without deferring + warns, no false 'no CI'" {
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":43,"title":"x","headRefOid":"d3d3d3d3d3d3d3d3","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
+EOF
+  gh() {
+    case "$1 $2" in
+      "pr view")
+        if   [[ "$*" == *"statusCheckRollup"* ]]; then return 1   # token can't read checks (403)
+        elif [[ "$*" == *"comments,reviews"* ]]; then cat "$STATE_DIR/prior"
+        else cat "$STATE_DIR/meta.json"; fi ;;
+      "pr checks")   return 1 ;;
+      "pr diff")     printf '%s\n' 'diff --git a/src/util.ts b/src/util.ts' '@@ -1 +1,2 @@' '+x' ;;
+      "pr checkout") : ;;
+      "repo clone")  mkdir -p "$4/.git" ;;
+      "pr comment")  echo "SHOULD-NOT-POST" >&2; return 1 ;;
+      *) echo "UNHANDLED gh $*" >&2; return 1 ;;
+    esac
+  }
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: green\n\n## Summary\nok","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  DRY_RUN=1
+  run review_pr 43
+  [ "$status" -eq 0 ]
+  has "CI status not readable" "$output"        # warned
+  lacks "CI not settled" "$output"              # did NOT defer
+  has "would post (verdict=green)" "$output"    # reviewed normally
+}
+
 @test "prepare_incremental: a fast-forward → incremental, captures prior review + author response" {
   GH_REPO="owner/repo"; pr=5; sha="def789abc0123456"; short="def789abc012"
   seen='<!-- auto-review v1 | repo=owner/repo | pr=5 | sha=abc123def456 | verdict=red | event=COMMENT -->'
@@ -762,6 +794,17 @@ EOF
   has "+full diff line" "$out"                       # …into the FULL diff (gh pr diff, not the compare API)
   lacks "INCREMENTAL RE-REVIEW" "$out"               # not the delta path
   lacks "ONLY the new commits" "$out"
+}
+
+@test "build_bundle: unreadable CI (unknown) → tells the model CI is not visible, not 'no checks'" {
+  GH_REPO="owner/repo"; pr=5; DOMAINS=code
+  INCREMENTAL=0; CI_STATE=unknown
+  local meta='{"title":"t","author":{"login":"alice"},"headRefOid":"def789abc0123456","files":[{"path":"a.ts","additions":1,"deletions":0}]}'
+  gh() { case "$1 $2" in "pr diff") printf '%s\n' "diff --git a/a.ts b/a.ts" "+x" ;; *) return 1 ;; esac; }
+  out="$(build_bundle 5 "$meta")"
+  has "not visible to this reviewer" "$out"   # honest "can't see CI"
+  has "do NOT comment on CI" "$out"           # tells the model not to flag it
+  lacks "no checks reported" "$out"           # NOT the misleading "no CI" line
 }
 
 @test "review_pr: incremental end-to-end — prior marker drives a delta review + base= in the marker (DRY_RUN)" {
