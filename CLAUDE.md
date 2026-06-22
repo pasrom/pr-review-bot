@@ -72,6 +72,12 @@ guard) `timeout`/`gtimeout`.
   untrusted external code). Note: an enabled `APPROVE` can satisfy branch-protection
   approval counts, so a repo needing human sign-off must require a human/CODEOWNERS
   approval in branch protection — that is the operator's responsibility, not the bot's.
+- **CI-aware (`ci_state` → passed|failed|pending|none).** While CI is `pending`
+  (or `none` has registered yet on a fresh push) the review is **deferred** up to
+  `CI_DEFER_MAX` ticks, so it never flags "no CI" against still-running checks;
+  after the cap it reviews anyway (repos with genuinely no CI still get reviewed).
+  The CI state is fed into the bundle, and in gate mode a **failing** CI never
+  auto-APPROVEs (downgrades to `COMMENT`) — red CI is a settled, objective signal.
 - **Inline comments are anchor-validated against the diff** before posting; never
   post model-supplied line numbers unchecked (off-diff lines 422 the review).
 - **Fork PRs are never checked out** — a cross-repository PR is forced to the

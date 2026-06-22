@@ -39,7 +39,8 @@ teardown() {
 gh() {
   case "$1 $2" in
     "pr view")
-      if [[ "$*" == *"comments,reviews"* ]]; then cat "$STATE_DIR/prior"
+      if   [[ "$*" == *"statusCheckRollup"* ]]; then cat "$STATE_DIR/ci_rollup" 2>/dev/null || printf '%s' '[{"status":"COMPLETED","conclusion":"SUCCESS"}]'
+      elif [[ "$*" == *"comments,reviews"* ]]; then cat "$STATE_DIR/prior"
       else cat "$STATE_DIR/meta.json"; fi ;;
     "pr checks")   echo "(no checks reported)" ;;
     "pr diff")     printf '%s\n' 'diff --git a/src/util.ts b/src/util.ts' '@@ -1 +1,2 @@' '+const x = 1;' ;;
@@ -120,6 +121,43 @@ lacks() { case "$2" in *"$1"*) printf 'assert lacks: unexpected >>%s<<\n' "$1" >
   # authentication.ts: 'auth' is not followed by a [._/-] boundary or end.
   route "alice" "src/authoritative.ts"
   [ "$DOMAINS" = code ]
+}
+
+# ── ci_state ─────────────────────────────────────────────────────────────────
+@test "ci_state: all checks completed+SUCCESS → passed" {
+  GH_REPO="owner/repo"
+  gh() { printf '%s' '[{"status":"COMPLETED","conclusion":"SUCCESS"},{"status":"COMPLETED","conclusion":"SUCCESS"}]'; }
+  [ "$(ci_state 1)" = passed ]
+}
+@test "ci_state: any FAILURE conclusion → failed" {
+  GH_REPO="owner/repo"
+  gh() { printf '%s' '[{"status":"COMPLETED","conclusion":"SUCCESS"},{"status":"COMPLETED","conclusion":"FAILURE"}]'; }
+  [ "$(ci_state 1)" = failed ]
+}
+@test "ci_state: an IN_PROGRESS check → pending (even if another already failed)" {
+  GH_REPO="owner/repo"
+  gh() { printf '%s' '[{"status":"IN_PROGRESS"},{"status":"COMPLETED","conclusion":"FAILURE"}]'; }
+  [ "$(ci_state 1)" = pending ]
+}
+@test "ci_state: a blocked check (conclusion ACTION_REQUIRED) → failed (not passed)" {
+  GH_REPO="owner/repo"
+  gh() { printf '%s' '[{"status":"COMPLETED","conclusion":"SUCCESS"},{"status":"COMPLETED","conclusion":"ACTION_REQUIRED"}]'; }
+  [ "$(ci_state 1)" = failed ]
+}
+@test "ci_state: empty rollup → none" {
+  GH_REPO="owner/repo"
+  gh() { printf '%s' '[]'; }
+  [ "$(ci_state 1)" = none ]
+}
+@test "ci_state: legacy status-context PENDING state → pending" {
+  GH_REPO="owner/repo"
+  gh() { printf '%s' '[{"state":"PENDING"}]'; }
+  [ "$(ci_state 1)" = pending ]
+}
+@test "ci_state: null/garbage rollup → none (safe default)" {
+  GH_REPO="owner/repo"
+  gh() { printf '%s' 'null'; }
+  [ "$(ci_state 1)" = none ]
 }
 
 # ── parse_verdict / is_valid_review / parse_body ─────────────────────────────
@@ -341,7 +379,9 @@ EOF
 EOF
   gh() {
     case "$1 $2" in
-      "pr view")    if [[ "$*" == *"comments,reviews"* ]]; then cat "$STATE_DIR/prior"; else cat "$STATE_DIR/meta.json"; fi ;;
+      "pr view")    if   [[ "$*" == *"statusCheckRollup"* ]]; then printf '%s' '[{"status":"COMPLETED","conclusion":"SUCCESS"}]'
+                    elif [[ "$*" == *"comments,reviews"* ]]; then cat "$STATE_DIR/prior"
+                    else cat "$STATE_DIR/meta.json"; fi ;;
       "pr checks")  echo "(no checks reported)" ;;
       "pr diff")    printf '%s\n' 'diff --git a/src/util.ts b/src/util.ts' '@@ -1 +1,2 @@' '+const x = 1;' ;;
       "repo clone") return 1 ;;   # clone fails → review_agentic must fall back to digest
@@ -576,6 +616,47 @@ EOF
 
 # ── incremental review (only the delta since the bot's last review, with memory) ─
 
+# ── CI gating in review_pr (defer while pending; never APPROVE on red CI) ────
+@test "review_pr: pending CI → defers the review (posts nothing), retries next run" {
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":40,"title":"x","headRefOid":"a0a0a0a0a0a0a0a0","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
+EOF
+  printf '%s' '[{"status":"IN_PROGRESS"}]' > "$STATE_DIR/ci_rollup"
+  run_claude() { echo "MODEL-SHOULD-NOT-RUN" >&2; return 1; }
+  DRY_RUN=1
+  run review_pr 40
+  [ "$status" -eq 0 ]
+  has "CI not settled (state=pending, defer 1/" "$output"
+  lacks "would post" "$output"
+}
+
+@test "review_pr: no CI yet is deferred up to CI_DEFER_MAX, then reviewed anyway" {
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":41,"title":"x","headRefOid":"b1b1b1b1b1b1b1b1","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
+EOF
+  printf '%s' '[]' > "$STATE_DIR/ci_rollup"   # no checks registered (e.g. fresh push)
+  CI_DEFER_MAX=2
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: green\n\n## Summary\nok","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  DRY_RUN=1
+  run review_pr 41; [ "$status" -eq 0 ]; has "defer 1/2" "$output"; lacks "would post" "$output"
+  run review_pr 41; [ "$status" -eq 0 ]; has "defer 2/2" "$output"; lacks "would post" "$output"
+  run review_pr 41; [ "$status" -eq 0 ]; has "reviewing anyway" "$output"; has "would post (verdict=green)" "$output"
+}
+
+@test "gate mode: failing CI → never auto-APPROVE even on a green verdict (downgrade to COMMENT)" {
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":42,"title":"x","headRefOid":"c2c2c2c2c2c2c2c2","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
+EOF
+  printf '%s' '[{"status":"COMPLETED","conclusion":"FAILURE"}]' > "$STATE_DIR/ci_rollup"
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: green\n\n## Summary\nlooks fine","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  ACTIONS_MODE=gate; DRY_RUN=1
+  run review_pr 42
+  [ "$status" -eq 0 ]
+  has "CI failing — not approving" "$output"
+  has "event=COMMENT" "$output"
+  lacks "would submit APPROVE" "$output"
+}
+
 @test "prepare_incremental: a fast-forward → incremental, captures prior review + author response" {
   GH_REPO="owner/repo"; pr=5; sha="def789abc0123456"; short="def789abc012"
   seen='<!-- auto-review v1 | repo=owner/repo | pr=5 | sha=abc123def456 | verdict=red | event=COMMENT -->'
@@ -698,7 +779,8 @@ EOF
       pr)
         case "$2" in
           view)
-            if [[ "$*" == *"comments,reviews,author"* ]]; then cat "$STATE_DIR/prview.json"
+            if   [[ "$*" == *"statusCheckRollup"* ]]; then printf '%s' '[{"status":"COMPLETED","conclusion":"SUCCESS"}]'
+            elif [[ "$*" == *"comments,reviews,author"* ]]; then cat "$STATE_DIR/prview.json"
             elif [[ "$*" == *"comments,reviews"* ]]; then cat "$STATE_DIR/prior"
             else cat "$STATE_DIR/meta.json"; fi ;;
           checks)   echo "(no checks reported)" ;;
@@ -734,7 +816,8 @@ EOF
       pr)
         case "$2" in
           view)
-            if [[ "$*" == *"comments,reviews,author"* ]]; then cat "$STATE_DIR/prview.json"
+            if   [[ "$*" == *"statusCheckRollup"* ]]; then printf '%s' '[{"status":"COMPLETED","conclusion":"SUCCESS"}]'
+            elif [[ "$*" == *"comments,reviews,author"* ]]; then cat "$STATE_DIR/prview.json"
             elif [[ "$*" == *"comments,reviews"* ]]; then cat "$STATE_DIR/prior"
             else cat "$STATE_DIR/meta.json"; fi ;;
           checks)   echo "(no checks reported)" ;;

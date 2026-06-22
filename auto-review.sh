@@ -80,6 +80,7 @@ FORCE="${FORCE:-0}"
 REVIEW_REQUESTED="${REVIEW_REQUESTED:-}"  # global default opt-in login (e.g. @me); a repos.conf 2nd column overrides it per repo
 REVIEW_ACTIONS="${REVIEW_ACTIONS:-comment}"  # global default verdict->action mode (comment|gate); a repos.conf 3rd column overrides it per repo
 INCREMENTAL_REVIEW="${INCREMENTAL_REVIEW:-1}"  # on re-review, review only the new commits since the bot's last review (1=on)
+CI_DEFER_MAX="${CI_DEFER_MAX:-3}"  # when CI is still pending / not yet reported, defer the review this many ticks before reviewing anyway — so it sees real CI results instead of flagging "no CI" against still-running checks
 MARKER="auto-review v1"
 REPOS=()
 REPO_FILTERS=()   # parallel to REPOS: per-repo review-requested override from repos.conf col 2
@@ -437,6 +438,24 @@ prepare_incremental() {
   } > "$LAST_PRIOR_FILE"
 }
 
+# ── CI status classifier ─────────────────────────────────────────────────────
+# Collapse the PR's status-check rollup to ONE word: passed | failed | pending |
+# none. Used to defer the review while CI is still settling (so it reviews
+# against real results instead of falsely flagging "no CI") and to never
+# auto-APPROVE a PR whose CI is red. Uses $GH_REPO. arg: pr.
+ci_state() {
+  local roll
+  roll="$(gh pr view "$1" -R "$GH_REPO" --json statusCheckRollup -q '.statusCheckRollup' 2>/dev/null || true)"
+  [[ -n "$roll" && "$roll" != "null" ]] || roll='[]'
+  printf '%s' "$roll" | jq -r '
+    map({ s: ((.status // .state // "") | ascii_upcase),
+          c: ((.conclusion // "")          | ascii_upcase) })
+    | if   length == 0 then "none"
+      elif any(.s=="QUEUED" or .s=="IN_PROGRESS" or .s=="PENDING" or .s=="EXPECTED" or .s=="WAITING") then "pending"
+      elif any(.c=="FAILURE" or .c=="TIMED_OUT" or .c=="CANCELLED" or .c=="ERROR" or .c=="STARTUP_FAILURE" or .c=="ACTION_REQUIRED" or .s=="FAILURE" or .s=="ERROR") then "failed"
+      else "passed" end' 2>/dev/null || echo none
+}
+
 # ── Review one PR (uses the current $GH_REPO) ────────────────────────────────
 review_pr() {
   local pr="$1"
@@ -480,6 +499,32 @@ review_pr() {
     log "$GH_REPO #$pr: head $short already reviewed, skip (FORCE=1 to override)"
     return
   fi
+
+  # CI gate: don't review against half-baked CI. While checks are still running
+  # (or none have registered yet on a fresh push), DEFER to a later tick so the
+  # review sees REAL results instead of falsely flagging "no CI" — bounded by
+  # CI_DEFER_MAX so a repo with genuinely no CI is still reviewed eventually.
+  # CI_STATE is also read by build_bundle (the model weighs it) and the gate
+  # (never auto-APPROVE a red PR).
+  local CI_STATE cidefer
+  CI_STATE="$(ci_state "$pr")"
+  cidefer="$STATE_DIR/cidefer/${GH_REPO//\//__}__${pr}__${short}"
+  case "$CI_STATE" in
+    pending|none)
+      if [[ "$FORCE" != "1" ]]; then
+        local dn; dn="$(cat "$cidefer" 2>/dev/null || echo 0)"
+        [[ "$dn" =~ ^[0-9]+$ ]] || dn=0   # tolerate a truncated/garbage counter
+        dn=$((dn + 1))
+        if [[ "$dn" -le "$CI_DEFER_MAX" ]]; then
+          mkdir -p "$(dirname "$cidefer")"; printf '%s' "$dn" > "$cidefer"
+          log "$GH_REPO #$pr: CI not settled (state=$CI_STATE, defer $dn/$CI_DEFER_MAX) — re-checking next run"
+          return
+        fi
+        log "$GH_REPO #$pr: CI still '$CI_STATE' after $CI_DEFER_MAX defers — reviewing anyway"
+      fi
+      ;;
+  esac
+  rm -f "$cidefer"   # proceeding to review → clear this head's defer counter
 
   # Incremental review: if the bot reviewed an earlier commit, review only the
   # delta since then with the prior review + author responses as memory.
@@ -570,6 +615,13 @@ review_pr() {
     if [[ "$event" == "APPROVE" && "$fork" == "true" ]]; then
       event="COMMENT"
       log "$GH_REPO #$pr: fork PR — not auto-approving; downgrading APPROVE to COMMENT"
+    fi
+    # Never auto-APPROVE a PR whose CI is red — that's a settled, objective
+    # signal, not an AI judgment. (The model is told CI failed too; this is the
+    # belt-and-suspenders cap.)
+    if [[ "$event" == "APPROVE" && "${CI_STATE:-}" == "failed" ]]; then
+      event="COMMENT"
+      log "$GH_REPO #$pr: CI failing — not approving; downgrading APPROVE to COMMENT"
     fi
   fi
 
@@ -681,8 +733,11 @@ build_bundle() {
     cat "$LAST_PRIOR_FILE"
     echo
   fi
-  echo "## CI status"
+  echo "## CI status: ${CI_STATE:-unknown}"
   gh pr checks "$pr" -R "$GH_REPO" 2>/dev/null || echo "(no checks reported)"
+  if [[ "${CI_STATE:-}" == "failed" ]]; then
+    echo "(CI is FAILING — treat this as a real blocker, not a nitpick.)"
+  fi
   echo
   echo "## Changed files"
   jq -r '.files[] | "\(.path)  (+\(.additions)/-\(.deletions))"' <<<"$meta"
