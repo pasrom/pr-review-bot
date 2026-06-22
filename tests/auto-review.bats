@@ -315,6 +315,7 @@ EOF
   has "<!-- auto-review v1 | repo=owner/repo | pr=5 | sha=abcdef123456" "$output"
   has "verdict=yellow" "$output"
   has "mode=digest" "$output"
+  has "full PR diff, at head" "$output"
 }
 
 @test "review_pr: skips a draft PR" {
@@ -654,4 +655,6 @@ EOF
   [ "$status" -eq 0 ]
   has "incremental review — only changes since abc123def456" "$output"
   has "base=abc123def456" "$output"
+  has 'Scope:** incremental' "$output"
+  has 'from `abc123def456` to `def789abc012`' "$output"
 }

@@ -544,13 +544,21 @@ review_pr() {
     *)               banner='> 🤖 **Automated pre-review** — not a human approval. A human reviewer makes the final call.' ;;
   esac
 
-  local basetag="full"
-  [[ "${INCREMENTAL:-0}" == "1" ]] && basetag="${PRIOR_SHA:0:12}"
+  # Visible scope line so a reader sees exactly which commit(s) this review covers
+  # (the SHAs are otherwise only in the hidden marker).
+  local basetag="full" scope
+  if [[ "${INCREMENTAL:-0}" == "1" ]]; then
+    basetag="${PRIOR_SHA:0:12}"
+    scope="🔎 **Scope:** incremental — only the changes from \`${PRIOR_SHA:0:12}\` to \`$short\` (commits added since the last review)."
+  else
+    scope="🔎 **Scope:** full PR diff, at head \`$short\`."
+  fi
   local comment
   comment="$(
     printf '<!-- %s | repo=%s | pr=%s | sha=%s | verdict=%s | event=%s | model=%s | mode=%s | domains=%s | inline=%s | base=%s -->\n' \
       "$MARKER" "$GH_REPO" "$pr" "$short" "$verdict" "$event" "$MODEL" "$MODE" "$DOMAINS" "$ncomments" "$basetag"
     printf '%s\n\n' "$banner"
+    printf '%s\n\n' "$scope"
     printf '%s\n\n' "## $(emoji "$verdict") Verdict: \`$verdict\`"
     printf '%s\n' "$body"
     printf '\n<!-- /auto-review -->\n'
