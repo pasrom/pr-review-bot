@@ -4,3 +4,5 @@
 com.pr-review-bot.plist
 # Your actual target list (copy from repos.conf.example).
 repos.conf
+# Never commit env files that carry tokens (e.g. a github.env sourced by the wrapper).
+*.env
