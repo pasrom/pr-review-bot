@@ -1,5 +1,7 @@
 # pr-review-bot — headless PR pre-reviewer (`claude -p`)
 
+> _Independent, community-built tool — **not affiliated with, endorsed by, or supported by Anthropic.** It simply invokes the `claude` CLI that you install and authenticate yourself. "Claude" and "Anthropic" are trademarks of Anthropic._
+
 A small, self-contained, **generic** automation that runs `claude -p` against
 open pull requests of one or more **target repositories** and posts an **English
 pre-review comment** via `gh`. It runs on a self-hosted box (e.g. a Mac mini) on
@@ -307,3 +309,19 @@ the macOS system bash the bot runs on in production, catching 3.2-only regressio
 - **Timeout dependency:** the hard per-call timeout needs `timeout` or `gtimeout`
   (`brew install coreutils`). Without it the script logs a warning and runs with
   no timeout.
+
+## Contributing & security
+
+- Contributing (tests, the bash-3.2 constraint, the output contract): see
+  [CONTRIBUTING.md](CONTRIBUTING.md).
+- Reporting a vulnerability: see [SECURITY.md](SECURITY.md).
+
+## License & disclaimer
+
+MIT — see [LICENSE](LICENSE).
+
+This is an **independent project, not affiliated with, endorsed by, or sponsored
+by Anthropic.** It is a thin wrapper around the `claude` CLI, which you install
+and authenticate under your own account/subscription; your use is subject to
+Anthropic's terms. "Claude" and "Anthropic" are trademarks of Anthropic, used
+here only to describe interoperability.
