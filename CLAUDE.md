@@ -45,7 +45,11 @@ guard) `timeout`/`gtimeout`.
   line, then a markdown body with `## ` sections. `is_valid_review()` HARD-
   validates this before posting; on failure it retries once with a corrective
   hint, then skips (no marker written → next run retries). Never post
-  unvalidated/fallback text as if it were a real review.
+  unvalidated/fallback text as if it were a real review. A claude **401**
+  (expired/invalid login) is logged as a distinct **`AUTH FAILED`** line (not the
+  generic transient-error warning) since it won't self-heal — grep logs for it
+  if reviews silently stop appearing; the fix is to re-authenticate the runner's
+  claude login.
 - **Rotation:** with no `GH_REPO`, each run reviews ONE repo from `repos.conf`
   and advances a persistent round-robin cursor (`$STATE_DIR/cursor`) — this is
   the deliberate stagger so a 15-min timer doesn't hit all repos at once.

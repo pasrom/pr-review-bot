@@ -264,6 +264,20 @@ lacks() { case "$2" in *"$1"*) printf 'assert lacks: unexpected >>%s<<\n' "$1" >
   [ "$(cat "$LAST_USAGE_FILE")" = "(usage unavailable)" ]
 }
 
+@test "run_claude_review: a 401 auth error logs a distinct AUTH FAILED warning (won't self-heal)" {
+  run_claude() { printf '%s' '{"is_error":true,"api_error_status":401,"result":"Failed to authenticate. API Error: 401 Invalid authentication credentials","total_cost_usd":0,"num_turns":1,"duration_ms":3500,"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  run run_claude_review -p
+  has "AUTH FAILED" "$output"
+  lacks "WARN no usable review" "$output"
+}
+
+@test "run_claude_review: a non-auth error (529 overloaded) keeps the generic transient warning, not AUTH FAILED" {
+  run_claude() { printf '%s' '{"is_error":true,"api_error_status":529,"result":"Overloaded","total_cost_usd":0,"num_turns":1,"duration_ms":1000,"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  run run_claude_review -p
+  has "WARN no usable review" "$output"
+  lacks "AUTH FAILED" "$output"
+}
+
 # ── effective_filter() ───────────────────────────────────────────────────────
 
 @test "effective_filter: absent → global REVIEW_REQUESTED default" {

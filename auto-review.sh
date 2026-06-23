@@ -150,7 +150,16 @@ run_claude_review() { # args: claude flags ; stdin: $LAST_INPUT_FILE
   if result="$(jq -er 'select(.is_error != true) | .result // empty' <<<"$out" 2>/dev/null)" && [[ -n "$result" ]]; then
     printf '%s' "$result"
   else
-    log "$GH_REPO #$pr: WARN no usable review from claude (timeout / API error / non-JSON) — emitting raw for validation"
+    # Distinguish an AUTH failure (expired/invalid claude login → HTTP 401) from a
+    # transient timeout/API error: a 401 will NOT self-heal on retry, so make it
+    # loud and greppable for the operator instead of looking like a flaky call.
+    local errstatus
+    errstatus="$(jq -r '.api_error_status // empty' <<<"$out" 2>/dev/null || true)"
+    if [[ "$errstatus" == "401" ]] || printf '%s' "$out" | grep -qiE 'failed to authenticate|invalid authentication'; then
+      log "$GH_REPO #$pr: AUTH FAILED — claude returned 401 (invalid/expired credentials). Re-authenticate the runner's claude login; every review will keep failing until then."
+    else
+      log "$GH_REPO #$pr: WARN no usable review from claude (timeout / API error / non-JSON) — emitting raw for validation"
+    fi
     printf '%s' "$out"
   fi
 }
