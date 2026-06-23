@@ -18,6 +18,11 @@ constraints keep it portable and safe.
 - **Don't weaken the guardrails** documented in `CLAUDE.md` / `SECURITY.md`
   (never merge, fork → digest, agentic is read-only, prompt-injection fencing,
   secrets only in the env wrapper).
+- **Never commit private data.** This is a public repo — no secrets, tokens,
+  real hostnames/IPs/paths, org or repo identifiers, or personal data. Keep
+  tracked files generic (`owner/name`, `__PLACEHOLDER__`); real config lives in
+  gitignored files (`repos.conf`, `*.env`, the rendered plist). See the
+  "Public repo — NEVER commit private data" section in `CLAUDE.md`.
 
 ## Running the tests
 

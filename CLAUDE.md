@@ -13,6 +13,26 @@ Not a product/library: there is no build, no dependencies to install. The only
 runtime requirements are `claude`, `gh`, `jq`, `git`, and (for the timeout
 guard) `timeout`/`gtimeout`.
 
+## Public repo — NEVER commit private data
+
+This repository is **public**. Everything committed is permanent and
+world-visible (the full history, not just the tip). Before every commit:
+
+- **No secrets** — tokens, API keys, credentials. They live only in the
+  launchd/env wrapper; `*.env`, the rendered `*.plist`, and `repos.conf` are
+  gitignored. Keep them that way.
+- **No private infrastructure** — real hostnames, IPs, internal usernames,
+  absolute `/Users/...` paths, Tailscale/VPN/machine details.
+- **No real org/repo identifiers or personal data** — keep code and examples
+  generic (`owner/name`, `__PLACEHOLDER__`); real config goes in the gitignored
+  files above.
+- **Commit as the public identity** — author/committer email must be the
+  maintainer's public address, never a work/org email. (This repo already had
+  to rewrite history once to scrub a leaked work email — don't repeat it.)
+
+When in doubt, leave it out: use a placeholder in the tracked file and put the
+real value in a gitignored one.
+
 ## Files
 
 - `auto-review.sh` — the whole tool (config → route → review → validate → post).
