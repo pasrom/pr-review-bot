@@ -106,6 +106,12 @@ real value in a gitignored one.
   false "no CI". The CI state is fed into the bundle, and in gate mode a
   **failing** CI never auto-APPROVEs (downgrades to `COMMENT`) — red CI is a
   settled, objective signal.
+- **Draft PRs are skipped by default** (`REVIEW_DRAFTS=0`) — a draft is
+  work-in-progress. `REVIEW_DRAFTS=1` opts into reviewing them; even then, in gate
+  mode a draft is **never auto-APPROVEd** (downgraded to `COMMENT`, mirroring the
+  fork rule) so it can't satisfy a branch-protection approval count while still
+  unfinished. `isDraft` is normalized fail-safe: only an explicit `false` is
+  treated as non-draft.
 - **Inline comments are anchor-validated against the diff** before posting; never
   post model-supplied line numbers unchecked (off-diff lines 422 the review).
 - **Fork PRs are never checked out** — a cross-repository PR is forced to the
