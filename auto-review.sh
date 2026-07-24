@@ -81,6 +81,7 @@ REVIEW_REQUESTED="${REVIEW_REQUESTED:-}"  # global default opt-in login (e.g. @m
 REVIEW_ACTIONS="${REVIEW_ACTIONS:-comment}"  # global default verdict->action mode (comment|gate); a repos.conf 3rd column overrides it per repo
 INCREMENTAL_REVIEW="${INCREMENTAL_REVIEW:-1}"  # on re-review, review only the new commits since the bot's last review (1=on)
 CI_DEFER_MAX="${CI_DEFER_MAX:-3}"  # when CI is still pending / not yet reported, defer the review this many ticks before reviewing anyway — so it sees real CI results instead of flagging "no CI" against still-running checks
+REVIEW_DRAFTS="${REVIEW_DRAFTS:-0}"  # review draft PRs too (1=on). Off by default: a draft is work-in-progress. In gate mode a draft is never auto-APPROVEd (downgraded to COMMENT), like a fork
 MARKER="auto-review v1"
 REPOS=()
 REPO_FILTERS=()   # parallel to REPOS: per-repo review-requested override from repos.conf col 2
@@ -488,9 +489,15 @@ review_pr() {
     || { log "$GH_REPO #$pr: cannot fetch metadata, skipping"; return; }
 
   [[ "$(jq -r '.state' <<<"$meta")" == "OPEN" ]]   || { log "$GH_REPO #$pr: not open, skip"; return; }
-  [[ "$(jq -r '.isDraft' <<<"$meta")" == "false" ]] || { log "$GH_REPO #$pr: draft, skip"; return; }
 
-  local author sha files short fork
+  local author sha files short fork is_draft
+  # Normalize like fork below: only an explicit "false" is non-draft; a missing/
+  # null value is treated as a draft (fail-safe toward the more restrictive path).
+  is_draft="$(jq -r '.isDraft' <<<"$meta")"
+  [[ "$is_draft" == "false" ]] || is_draft="true"
+  if [[ "$is_draft" == "true" && "$REVIEW_DRAFTS" != "1" ]]; then
+    log "$GH_REPO #$pr: draft, skip (set REVIEW_DRAFTS=1 to review drafts)"; return
+  fi
   author="$(jq -r '.author.login' <<<"$meta")"
   sha="$(jq -r '.headRefOid' <<<"$meta")"
   short="${sha:0:12}"
@@ -639,6 +646,13 @@ review_pr() {
     if [[ "$event" == "APPROVE" && "$fork" == "true" ]]; then
       event="COMMENT"
       log "$GH_REPO #$pr: fork PR — not auto-approving; downgrading APPROVE to COMMENT"
+    fi
+    # Never auto-APPROVE a draft (only reachable with REVIEW_DRAFTS=1) — it is
+    # explicitly work-in-progress, so don't let it satisfy a branch-protection
+    # approval count. It can still get COMMENT / REQUEST_CHANGES.
+    if [[ "$event" == "APPROVE" && "$is_draft" == "true" ]]; then
+      event="COMMENT"
+      log "$GH_REPO #$pr: draft PR — not auto-approving; downgrading APPROVE to COMMENT"
     fi
     # Never auto-APPROVE a PR whose CI is red — that's a settled, objective
     # signal, not an AI judgment. (The model is told CI failed too; this is the
@@ -922,7 +936,7 @@ poll_repo() {
   local prs=() n listmsg sel=()
   # Opt-in mode (filter set): only PRs that explicitly request this account as a
   # reviewer — GitHub's search resolves @me to the token account. Otherwise:
-  # every open PR. Drafts are dropped later in review_pr.
+  # every open PR. Drafts are dropped later in review_pr unless REVIEW_DRAFTS=1.
   if [[ -n "$filter" ]]; then
     sel=(--search "state:open review-requested:$filter"); listmsg="requested for $filter"
   else

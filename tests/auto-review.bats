@@ -424,6 +424,31 @@ EOF
   has "draft, skip" "$output"
 }
 
+@test "review_pr: reviews a draft PR when REVIEW_DRAFTS=1" {
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":26,"title":"wip","headRefOid":"deadbeefdead0026","author":{"login":"alice"},"isDraft":true,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
+EOF
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: yellow\n\n## Summary\nwip","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  REVIEW_DRAFTS=1; DRY_RUN=1
+  run review_pr 26
+  [ "$status" -eq 0 ]
+  lacks "draft, skip" "$output"
+  has "would post (verdict=yellow)" "$output"
+}
+
+@test "gate mode: a draft PR is never auto-APPROVEd (downgraded to COMMENT)" {
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":27,"title":"wip","headRefOid":"deadbeefdead0027","author":{"login":"alice"},"isDraft":true,"state":"OPEN","isCrossRepository":false,"files":[{"path":"src/util.ts","additions":1,"deletions":0}]}
+EOF
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: green\n\n## Summary\nlgtm","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  ACTIONS_MODE=gate; REVIEW_DRAFTS=1; DRY_RUN=1
+  run review_pr 27
+  [ "$status" -eq 0 ]
+  has "draft PR — not auto-approving; downgrading APPROVE to COMMENT" "$output"
+  lacks "would submit APPROVE" "$output"
+  has "event=COMMENT" "$output"
+}
+
 @test "review_pr: rejects a non-numeric PR id (injection guard)" {
   run review_pr '5; rm -rf /'
   [ "$status" -eq 0 ]
