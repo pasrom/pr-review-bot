@@ -101,10 +101,14 @@ real value in a gitignored one.
   up to `CI_DEFER_MAX` ticks, so it never flags "no CI" against still-running
   checks; after the cap it reviews anyway (repos with genuinely no CI still get
   reviewed). A **failed CI query** (e.g. the token can't read checks — GraphQL
-  "Resource not accessible" / REST 403) is `unknown`, NOT `none`: the bot does
-  NOT defer (futile) and tells the model CI isn't visible, instead of posting a
-  false "no CI". The CI state is fed into the bundle, and in gate mode a
-  **failing** CI never auto-APPROVEs (downgrades to `COMMENT`) — red CI is a
+  "Resource not accessible" / REST 403; a fine-grained PAT cannot get check-run
+  read) falls back to the Actions workflow runs of the head commit
+  (`ci_state_from_runs`; GitHub-managed `dynamic` workflows such as Dependabot
+  updates are ignored; newest run per workflow and event). If that fails too or
+  finds no runs (it can confirm CI, never its absence) it is `unknown`, NOT
+  `none`: the bot does NOT defer (futile) and tells the model CI isn't visible,
+  instead of posting a false "no CI". The CI state is fed into the bundle, and in gate mode
+  a **failing** CI never auto-APPROVEs (downgrades to `COMMENT`) — red CI is a
   settled, objective signal.
 - **Draft PRs are skipped by default** (`REVIEW_DRAFTS=0`) — a draft is
   work-in-progress. `REVIEW_DRAFTS=1` opts into reviewing them; even then, in gate

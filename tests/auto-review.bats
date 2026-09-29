@@ -39,10 +39,14 @@ teardown() {
 gh() {
   case "$1 $2" in
     "pr view")
-      if   [[ "$*" == *"statusCheckRollup"* ]]; then cat "$STATE_DIR/ci_rollup" 2>/dev/null || printf '%s' '[{"status":"COMPLETED","conclusion":"SUCCESS"}]'
+      if   [[ "$*" == *"statusCheckRollup"* ]]; then
+        [[ ! -e "$STATE_DIR/ci_rollup_fail" ]] || return 1   # token can't read checks (403)
+        cat "$STATE_DIR/ci_rollup" 2>/dev/null || printf '%s' '[{"status":"COMPLETED","conclusion":"SUCCESS"}]'
       elif [[ "$*" == *"comments,reviews"* ]]; then cat "$STATE_DIR/prior"
       else cat "$STATE_DIR/meta.json"; fi ;;
-    "pr checks")   echo "(no checks reported)" ;;
+    "pr checks")   [[ ! -e "$STATE_DIR/ci_rollup_fail" ]] || return 1; echo "(no checks reported)" ;;
+    api\ *)        [[ "$*" == *"/actions/runs?head_sha="* && -e "$STATE_DIR/runs" ]] || return 1
+                   cat "$STATE_DIR/runs" ;;   # workflow-run fallback
     "pr diff")     printf '%s\n' 'diff --git a/src/util.ts b/src/util.ts' '@@ -1 +1,2 @@' '+const x = 1;' ;;
     "pr checkout") : ;;                  # agentic checkout (stubbed; no network)
     "pr comment")  echo "SHOULD-NOT-POST-IN-DRY-RUN" >&2; return 1 ;;
@@ -163,6 +167,48 @@ lacks() { case "$2" in *"$1"*) printf 'assert lacks: unexpected >>%s<<\n' "$1" >
   GH_REPO="owner/repo"
   gh() { return 1; }   # e.g. GraphQL "Resource not accessible" / REST 403
   [ "$(ci_state 1)" = unknown ]
+}
+
+# Fallback: the rollup is unreadable (fine-grained token, no check-run read) but the
+# Actions workflow runs of the head commit are. Uses the default gh stub.
+runs_state() {  # arg: workflow-runs REST body (omit = the runs query fails too)
+  touch "$STATE_DIR/ci_rollup_fail"
+  [[ $# -eq 0 ]] || printf '%s' "$1" > "$STATE_DIR/runs"
+  ci_state 1 abc1234
+}
+@test "ci_state: unreadable rollup, successful workflow runs → passed" {
+  [ "$(runs_state '{"workflow_runs":[{"event":"pull_request","status":"completed","conclusion":"success"}]}')" = passed ]
+}
+@test "ci_state: unreadable rollup, a failed workflow run → failed" {
+  [ "$(runs_state '{"workflow_runs":[{"event":"push","status":"completed","conclusion":"success"},{"event":"pull_request","status":"completed","conclusion":"failure"}]}')" = failed ]
+}
+@test "ci_state: unreadable rollup, a queued or requested workflow run → pending" {
+  [ "$(runs_state '{"workflow_runs":[{"event":"pull_request","status":"requested","conclusion":null}]}')" = pending ]
+  [ "$(runs_state '{"workflow_runs":[{"event":"pull_request","status":"queued","conclusion":null}]}')" = pending ]
+}
+@test "ci_state: unreadable rollup, only GitHub-managed dynamic workflows → unknown (the fallback cannot prove 'no CI')" {
+  [ "$(runs_state '{"workflow_runs":[{"event":"dynamic","status":"completed","conclusion":"failure"}]}')" = unknown ]
+}
+@test "ci_state: unreadable rollup, no workflow runs at all → unknown, not none" {
+  [ "$(runs_state '{"workflow_runs":[]}')" = unknown ]
+}
+@test "ci_state: unreadable rollup, a run superseded on the same commit does not count → passed" {
+  # Same workflow + event: the cancelled older run was replaced by a green one.
+  [ "$(runs_state '{"workflow_runs":[{"workflow_id":7,"event":"pull_request","created_at":"2026-01-01T10:00:00Z","status":"completed","conclusion":"cancelled"},{"workflow_id":7,"event":"pull_request","created_at":"2026-01-01T10:05:00Z","status":"completed","conclusion":"success"}]}')" = passed ]
+  # A different workflow failing on the same commit still fails the state.
+  [ "$(runs_state '{"workflow_runs":[{"workflow_id":7,"event":"pull_request","created_at":"2026-01-01T10:05:00Z","status":"completed","conclusion":"success"},{"workflow_id":8,"event":"pull_request","created_at":"2026-01-01T10:00:00Z","status":"completed","conclusion":"failure"}]}')" = failed ]
+}
+@test "ci_state: unreadable rollup and unreadable runs → unknown" {
+  [ "$(runs_state)" = unknown ]
+}
+@test "ci_state: unreadable rollup, garbage runs body → unknown (never empty)" {
+  [ "$(runs_state 'not json')" = unknown ]
+}
+@test "ci_state: unreadable rollup and no valid head sha → unknown, runs never queried" {
+  gh() { if [[ "$1" == api ]]; then echo QUERIED > "$STATE_DIR/queried"; fi; return 1; }
+  [ "$(ci_state 1)" = unknown ]
+  [ "$(ci_state 1 'x;rm -rf')" = unknown ]
+  [ ! -e "$STATE_DIR/queried" ]
 }
 
 # ── parse_verdict / is_valid_review / parse_body ─────────────────────────────
@@ -699,6 +745,38 @@ EOF
   has "CI failing — not approving" "$output"
   has "event=COMMENT" "$output"
   lacks "would submit APPROVE" "$output"
+}
+
+@test "review_pr: unreadable check rollup → CI state and run list come from one workflow-run snapshot" {
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":44,"title":"x","headRefOid":"e4e4e4e4e4e4e4e4","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"docs/a.md","additions":1,"deletions":0}]}
+EOF
+  touch "$STATE_DIR/ci_rollup_fail"
+  printf '%s' '{"workflow_runs":[{"name":"ci","event":"pull_request","status":"completed","conclusion":"success"}]}' > "$STATE_DIR/runs"
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: green\n\n## Summary\nok","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  DRY_RUN=1
+  run review_pr 44
+  [ "$status" -eq 0 ]
+  lacks "CI status not readable" "$output"                 # the fallback made CI visible
+  has "would post (verdict=green)" "$output"
+  has "## CI status: passed" "$(cat "$LAST_INPUT_FILE")"
+  has "ci	completed	success" "$(cat "$LAST_INPUT_FILE")"   # listed from the snapshot
+  has "GitHub Actions workflow runs only" "$(cat "$LAST_INPUT_FILE")"   # the model knows the limit
+  lacks "(no checks reported)" "$(cat "$LAST_INPUT_FILE")"
+}
+
+@test "review_pr: a readable rollup never lists runs left over from a previous PR" {
+  cat > "$STATE_DIR/meta.json" <<'EOF'
+{"number":45,"title":"x","headRefOid":"f5f5f5f5f5f5f5f5","author":{"login":"alice"},"isDraft":false,"state":"OPEN","isCrossRepository":false,"files":[{"path":"docs/a.md","additions":1,"deletions":0}]}
+EOF
+  printf '%s' '[{"name":"stale-run","status":"completed","conclusion":"failure"}]' > "$LAST_CI_RUNS_FILE"
+  run_claude() { printf '%s' '{"is_error":false,"result":"VERDICT: green\n\n## Summary\nok","total_cost_usd":0.01,"num_turns":1,"duration_ms":1,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}'; }
+  DRY_RUN=1
+  run review_pr 45
+  [ "$status" -eq 0 ]
+  has "would post (verdict=green)" "$output"
+  has "## CI status: passed" "$(cat "$LAST_INPUT_FILE")"
+  lacks "stale-run" "$(cat "$LAST_INPUT_FILE")"
 }
 
 @test "review_pr: unreadable CI (token can't read checks) → reviews without deferring + warns, no false 'no CI'" {
