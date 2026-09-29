@@ -96,6 +96,7 @@ LAST_INPUT_FILE="$STATE_DIR/.last_input"
 LAST_INVOCATION_FILE="$STATE_DIR/.last_invocation"
 LAST_USAGE_FILE="$STATE_DIR/.last_usage"   # token usage + cost, one line per model call (reset per PR)
 LAST_PRIOR_FILE="$STATE_DIR/.last_prior"   # incremental review: prior review + author responses (memory)
+LAST_CI_RUNS_FILE="$STATE_DIR/.last_ci_runs"   # CI fallback: workflow runs ci_state read (reset per PR)
 log() { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" | tee -a "$LOG" >&2; }
 
 # Single-flight lock path (macOS has no flock; mkdir is atomic). Acquired in
@@ -453,27 +454,57 @@ prepare_incremental() {
 # none | unknown (= the query itself failed, e.g. the token can't read checks).
 # Used to defer the review while CI is still settling (so it reviews against real
 # results instead of falsely flagging "no CI") and to never auto-APPROVE a PR
-# whose CI is red. Uses $GH_REPO. arg: pr.
+# whose CI is red. Uses $GH_REPO. args: pr, head sha (for the fallback).
 ci_state() {
   local roll
   # A FAILED query (e.g. the token can't read checks → GraphQL "Resource not
-  # accessible" / REST 403) is NOT the same as "no checks": report it as
-  # 'unknown' so the caller neither defers forever nor posts a false "no CI".
+  # accessible" / REST 403) is NOT the same as "no checks": fall back to the
+  # workflow runs, and report 'unknown' if those are unreadable too, so the
+  # caller neither defers forever nor posts a false "no CI".
   # Relies on gh exiting non-zero on the error (holds for a 403 / hard GraphQL
   # error). A hypothetical silent HTTP-200 partial error (exit 0, field null)
   # would fall through to 'none' — an accepted, gh-version-dependent edge; note
   # null is also the legitimate "no checks" value, so it can't be remapped.
   if ! roll="$(gh pr view "$1" -R "$GH_REPO" --json statusCheckRollup -q '.statusCheckRollup' 2>/dev/null)"; then
-    echo unknown; return
+    ci_state_from_runs "${2:-}"; return
   fi
   [[ -n "$roll" && "$roll" != "null" ]] || roll='[]'
-  printf '%s' "$roll" | jq -r '
+  printf '%s' "$roll" | ci_classify
+}
+
+# stdin: JSON array of checks, status contexts or workflow runs → one word.
+ci_classify() {
+  jq -r '
     map({ s: ((.status // .state // "") | ascii_upcase),
           c: ((.conclusion // "")          | ascii_upcase) })
     | if   length == 0 then "none"
-      elif any(.s=="QUEUED" or .s=="IN_PROGRESS" or .s=="PENDING" or .s=="EXPECTED" or .s=="WAITING") then "pending"
+      elif any(.s=="QUEUED" or .s=="IN_PROGRESS" or .s=="PENDING" or .s=="EXPECTED" or .s=="WAITING" or .s=="REQUESTED") then "pending"
       elif any(.c=="FAILURE" or .c=="TIMED_OUT" or .c=="CANCELLED" or .c=="ERROR" or .c=="STARTUP_FAILURE" or .c=="ACTION_REQUIRED" or .s=="FAILURE" or .s=="ERROR") then "failed"
       else "passed" end' 2>/dev/null || echo unknown
+}
+
+# Fallback when the check rollup is not readable: a fine-grained token cannot be
+# granted check-run read, but it can read GitHub Actions workflow runs. Sees
+# Actions CI only, so it can confirm CI but never its absence: a failed query or
+# an empty list stays 'unknown', not 'none'. GitHub-managed dynamic workflows
+# (event "dynamic", e.g. Dependabot updates) are not CI and are ignored. Like the
+# rollup, only the newest run per workflow and event counts, so a run superseded
+# on the same commit (reopen, label, cancel-in-progress) cannot fail the state.
+# The runs go to LAST_CI_RUNS_FILE so build_bundle lists the same snapshot
+# without a second query. arg: head sha.
+ci_state_from_runs() {
+  local runs
+  [[ "${1:-}" =~ ^[0-9a-f]{7,40}$ ]] || { echo unknown; return; }
+  # Filter inside the assignment so a garbage body fails here, not as empty stdin
+  # to ci_classify (which would print nothing instead of 'unknown').
+  if ! runs="$(gh api "repos/$GH_REPO/actions/runs?head_sha=$1&per_page=100" 2>/dev/null \
+               | jq -ce '[.workflow_runs[]? | select(.event != "dynamic")]
+                        | group_by([.workflow_id, .event]) | map(max_by(.created_at))' 2>/dev/null)" \
+     || [[ "$runs" == "[]" ]]; then
+    echo unknown; return
+  fi
+  printf '%s' "$runs" > "$LAST_CI_RUNS_FILE"
+  printf '%s' "$runs" | ci_classify
 }
 
 # ── Review one PR (uses the current $GH_REPO) ────────────────────────────────
@@ -533,7 +564,8 @@ review_pr() {
   # CI_STATE is also read by build_bundle (the model weighs it) and the gate
   # (never auto-APPROVE a red PR).
   local CI_STATE cidefer
-  CI_STATE="$(ci_state "$pr")"
+  : > "$LAST_CI_RUNS_FILE"   # never list a previous PR's runs
+  CI_STATE="$(ci_state "$pr" "$sha")"
   cidefer="$STATE_DIR/cidefer/${GH_REPO//\//__}__${pr}__${short}"
   case "$CI_STATE" in
     pending|none)
@@ -776,7 +808,14 @@ build_bundle() {
     echo "Do NOT treat this as missing CI and do NOT comment on CI passing or failing — it is simply not visible to you."
   else
     echo "## CI status: ${CI_STATE:-unknown}"
-    gh pr checks "$pr" -R "$GH_REPO" 2>/dev/null || echo "(no checks reported)"
+    if [[ -s "$LAST_CI_RUNS_FILE" ]]; then   # the state came from the workflow-run fallback
+      echo "(From GitHub Actions workflow runs only: checks from other providers are not visible.)"
+      local runs
+      runs="$(jq -r '.[] | "\(.name)\t\(.status)\t\(.conclusion // "-")"' "$LAST_CI_RUNS_FILE" 2>/dev/null || true)"
+      printf '%s\n' "${runs:-(no checks reported)}"
+    else
+      gh pr checks "$pr" -R "$GH_REPO" 2>/dev/null || echo "(no checks reported)"
+    fi
     if [[ "${CI_STATE:-}" == "failed" ]]; then
       echo "(CI is FAILING — treat this as a real blocker, not a nitpick.)"
     fi
