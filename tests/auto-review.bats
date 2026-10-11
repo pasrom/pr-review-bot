@@ -261,25 +261,35 @@ runs_state() {  # arg: workflow-runs REST body (omit = the runs query fails too)
 @test "record_usage: formats figures from a valid envelope" {
   record_usage '{"is_error":false,"total_cost_usd":0.04,"num_turns":2,"duration_ms":99,"usage":{"input_tokens":10,"output_tokens":20,"cache_creation_input_tokens":3,"cache_read_input_tokens":4}}'
   run cat "$LAST_USAGE_FILE"
-  [ "$output" = "in=10 out=20 cache_w=3 cache_r=4 cost_usd=0.04 turns=2 api_ms=99" ]
+  [ "$output" = "model=test-model in=10 out=20 cache_w=3 cache_r=4 cost_usd=0.04 turns=2 api_ms=99" ]
 }
 
 @test "record_usage: missing fields default to 0" {
   record_usage '{"is_error":false}'
   run cat "$LAST_USAGE_FILE"
-  [ "$output" = "in=0 out=0 cache_w=0 cache_r=0 cost_usd=0 turns=0 api_ms=0" ]
+  [ "$output" = "model=test-model in=0 out=0 cache_w=0 cache_r=0 cost_usd=0 turns=0 api_ms=0" ]
 }
 
 @test "record_usage: non-JSON input → (usage unavailable)" {
   record_usage "this is not json at all"
   run cat "$LAST_USAGE_FILE"
-  [ "$output" = "(usage unavailable)" ]
+  [ "$output" = "model=test-model (usage unavailable)" ]
 }
 
 @test "record_usage: empty input → (usage unavailable)" {
   record_usage ""
   run cat "$LAST_USAGE_FILE"
-  [ "$output" = "(usage unavailable)" ]
+  [ "$output" = "model=test-model (usage unavailable)" ]
+}
+
+@test "record_usage: records the resolved snapshot id(s) from modelUsage, not the alias" {
+  # $MODEL is the floating alias that was routed; the archive must record what
+  # actually ran. modelUsage can carry several ids (main model + a Task subagent);
+  # jq `keys` lists them sorted.
+  MODEL="opus"
+  record_usage '{"is_error":false,"total_cost_usd":0.1,"num_turns":1,"duration_ms":5,"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"modelUsage":{"claude-opus-5-5":{},"claude-sonnet-5-5":{}}}'
+  run cat "$LAST_USAGE_FILE"
+  [ "$output" = "model=claude-opus-5-5,claude-sonnet-5-5 in=1 out=1 cache_w=0 cache_r=0 cost_usd=0.1 turns=1 api_ms=5" ]
 }
 
 # ── run_claude_review() — model envelope handling ────────────────────────────
@@ -307,7 +317,7 @@ runs_state() {  # arg: workflow-runs REST body (omit = the runs query fails too)
   out="$(run_claude_review -p)"
   run is_valid_review <<<"$out"
   [ "$status" -ne 0 ]
-  [ "$(cat "$LAST_USAGE_FILE")" = "(usage unavailable)" ]
+  [ "$(cat "$LAST_USAGE_FILE")" = "model=test-model (usage unavailable)" ]
 }
 
 @test "run_claude_review: a 401 auth error logs a distinct AUTH FAILED warning (won't self-heal)" {

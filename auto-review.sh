@@ -68,9 +68,14 @@ PROMPT_FILE="${PROMPT_FILE:-$SCRIPT_DIR/reviewer-prompt.md}"
 REPOS_FILE="${REPOS_FILE:-$SCRIPT_DIR/repos.conf}"
 SUBAGENTS="${SUBAGENTS:-}"
 ALL="${ALL:-0}"
-MODEL_CHEAP="${MODEL_CHEAP:-claude-haiku-4-5}"
-MODEL_MID="${MODEL_MID:-claude-sonnet-4-6}"
-MODEL_DEEP="${MODEL_DEEP:-claude-opus-4-8}"
+# Model per risk tier, as aliases (not pinned snapshots) so each tier tracks the
+# latest the installed `claude` CLI knows. The alias→snapshot map is baked into
+# the CLI version, so it only advances when the CLI is upgraded. record_usage()
+# logs the resolved snapshot (provenance survives the floating alias); pin a tier
+# with a full id (e.g. MODEL_DEEP=claude-opus-5-5). See README for the details.
+MODEL_CHEAP="${MODEL_CHEAP:-haiku}"
+MODEL_MID="${MODEL_MID:-sonnet}"
+MODEL_DEEP="${MODEL_DEEP:-opus}"
 MAX_DIFF_LINES="${MAX_DIFF_LINES:-2000}"
 STATE_DIR="${STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/pr-review-bot}"
 ARCHIVE="${ARCHIVE:-1}"          # write a per-review debug session file
@@ -170,7 +175,14 @@ run_claude_review() { # args: claude flags ; stdin: $LAST_INPUT_FILE
 # line to $LAST_USAGE_FILE (shown in the archive; one line per model call, so a
 # retried review records both attempts). Best-effort — never fails the caller.
 record_usage() { # arg: claude JSON result object
-  local line
+  local line model_ran
+  # Which snapshot(s) ACTUALLY ran. $MODEL is a floating alias (haiku/sonnet/opus)
+  # that resolves to a different id over time, so the routed tier alone can't say
+  # what executed — record the resolved id(s) from the model's JSON. There can be
+  # several (main model + a Task subagent), so list all keys. Falls back to the
+  # routed $MODEL when the field is absent (error envelope, mocked test calls).
+  model_ran="$(jq -r '(.modelUsage // {}) | keys | join(",")' <<<"$1" 2>/dev/null)" || model_ran=""
+  [[ -n "$model_ran" ]] || model_ran="$MODEL"
   line="$(jq -r '
       "in=\(.usage.input_tokens // 0)"
     + " out=\(.usage.output_tokens // 0)"
@@ -183,6 +195,9 @@ record_usage() { # arg: claude JSON result object
   # whitespace input (zero records, exit 0 — e.g. a billed call killed before it
   # emitted output). Both mean we have no usable figures.
   [[ -n "$line" ]] || line="(usage unavailable)"
+  # Prepend the resolved snapshot so both the log AND the archive ($LAST_USAGE_FILE)
+  # record what ran, not just the floating alias.
+  line="model=$model_ran $line"
   log "$GH_REPO #$pr: usage [$MODE $MODEL] $line"
   printf '%s\n' "$line" >> "$LAST_USAGE_FILE"
 }

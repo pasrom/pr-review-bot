@@ -187,7 +187,7 @@ cursor wraps over the current length.
 | `SUBAGENTS` | _(unset)_ | space-separated review subagent names for agentic mode |
 | `PROMPT_FILE` | `./reviewer-prompt.md` | reviewer persona (override per target) |
 | `REPO_DIR` | `$STATE_DIR/checkout/<owner__repo>` | self-managed disposable clone (agentic) |
-| `MODEL_CHEAP` / `MODEL_MID` / `MODEL_DEEP` | haiku / sonnet / opus | per-route models |
+| `MODEL_CHEAP` / `MODEL_MID` / `MODEL_DEEP` | `haiku` / `sonnet` / `opus` | per-route models, as **aliases** so each tier tracks the latest the installed `claude` CLI knows — no bump when a new version ships. The alias→snapshot map is baked into the **CLI version** and only moves when the CLI is upgraded, so "always latest" also means keeping the CLI current (e.g. `sonnet` resolved to 5.0 on an older CLI, 5.5 after upgrading). The aliases aren't symmetric: `sonnet`/`opus` float to undated ids while `haiku` currently resolves to a dated snapshot. The resolved snapshot that actually ran is logged by `record_usage` (`model=…` in the usage line + archive), so provenance survives the floating alias. Pin a tier by setting a full id (e.g. `MODEL_DEEP=claude-opus-5-5`). |
 | `MAX_DIFF_LINES` | `2000` | diff cap fed to the model |
 | `CLAUDE_TIMEOUT` | `600` | hard per-call timeout (needs `timeout`/`gtimeout`) |
 | `STATE_DIR` | `$XDG_STATE_HOME/pr-review-bot` | lock + logs + cursor + clones |
