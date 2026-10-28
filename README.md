@@ -207,11 +207,34 @@ cursor wraps over the current length.
   **not** the broad classic `repo` scope. The runner checks out PR branches and
   runs tools against them; keep the blast radius of a compromised runner minimal.
 
-> ⚠️ The rendered `~/Library/LaunchAgents/com.pr-review-bot.plist` holds these
-> tokens in cleartext. Never commit it; `chmod 600` it. Only the `.example` (with
-> placeholders) lives in the repo.
+> ⚠️ The rendered `~/Library/LaunchAgents/com.pr-review-bot.plist` (macOS) or the
+> env file the systemd unit reads (Linux) holds these tokens in cleartext. Never
+> commit it; `chmod 600` it. Only the `.example` files (with placeholders) live in
+> the repo.
 
-## Schedule (launchd)
+### Shared host
+
+Run the bot as **its own user** if anything else runs on the machine, above all
+CI runners: every job a self-hosted runner executes can read the runner user's
+files, so a shared user hands the GitHub token (and, in gate mode, the power to
+APPROVE) to every workflow the runner serves.
+
+- Keep the bot's home `chmod 700` and clone the bot **inside it**: whoever can
+  write `auto-review.sh` or `reviewer-prompt.md` runs code with the bot's token.
+- Keep the bot user **out of the `docker` group**, which is root-equivalent. The
+  systemd template also blocks the default docker socket for the service.
+- **The runner user needs the same care.** If it is in the `docker` group of a
+  rootful daemon, every workflow is effectively root and reads the bot's env file
+  and home regardless of the steps above. Give the runners rootless Docker (or
+  Podman), or run them in a VM or on another host.
+
+## Schedule
+
+Runs every 15 min; the script single-flight-locks so runs never overlap.
+Logs: `$STATE_DIR/auto-review.log`, plus the launchd std{out,err} logs on macOS
+or the journal on Linux (`sudo journalctl -u pr-review-bot`).
+
+### macOS (launchd)
 
 ```bash
 cp com.pr-review-bot.plist.example \
@@ -220,8 +243,32 @@ cp com.pr-review-bot.plist.example \
 launchctl load -w ~/Library/LaunchAgents/com.pr-review-bot.plist
 ```
 
-Runs every 15 min; the script single-flight-locks so runs never overlap.
-Logs: `$STATE_DIR/auto-review.log` plus the launchd std{out,err} logs.
+### Linux (systemd)
+
+```bash
+sudo cp pr-review-bot.service.example /etc/systemd/system/pr-review-bot.service
+sudo cp pr-review-bot.timer.example   /etc/systemd/system/pr-review-bot.timer
+# replace __BOT_USER__, __HOME__ (the bot user's home) and __BOT_DIR__ (this clone)
+sudo install -d -m 700 /etc/pr-review-bot
+sudo install -m 600 /dev/null /etc/pr-review-bot/pr-review-bot.env
+sudoedit /etc/pr-review-bot/pr-review-bot.env   # plain VAR=value lines, see § Auth
+sudo -u <bot-user> cp repos.conf.example repos.conf   # then list the targets
+sudo systemctl daemon-reload
+```
+
+Dry run first (posts nothing), then go live:
+
+```bash
+sudo systemctl edit --runtime pr-review-bot.service   # [Service] Environment=DRY_RUN=1
+sudo systemctl start pr-review-bot.service && journalctl -u pr-review-bot -e
+sudo systemctl revert pr-review-bot.service
+sudo systemctl enable --now pr-review-bot.timer
+```
+
+systemd reads the env file itself, not a shell: no `export`, no `$VAR`
+expansion, so a sourced `*.env` of the launchd setup needs its `export`s removed.
+The runtime drop-in only works while the env file does not set `DRY_RUN` itself
+(`EnvironmentFile=` wins over `Environment=`).
 
 ## Debugging (session archive)
 
@@ -307,9 +354,9 @@ the macOS system bash the bot runs on in production, catching 3.2-only regressio
 - **Stale lock:** the single-flight lock is a `mkdir` under `$STATE_DIR/.lock`.
   A `SIGKILL`/power-loss mid-run can orphan it, which silently disables the
   reviewer. If runs stop happening, `rmdir "$STATE_DIR/.lock"`.
-- **Timeout dependency:** the hard per-call timeout needs `timeout` or `gtimeout`
-  (`brew install coreutils`). Without it the script logs a warning and runs with
-  no timeout.
+- **Timeout dependency:** the hard per-call timeout needs `timeout` or `gtimeout`.
+  Linux has `timeout` in coreutils; on macOS, `brew install coreutils`. Without it
+  the script logs a warning and runs with no timeout.
 
 ## Contributing & security
 

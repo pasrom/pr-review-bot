@@ -7,7 +7,8 @@ A generic, self-hosted **headless PR pre-reviewer**. A single Bash script
 target repositories and posts an English pre-review comment via the `gh` CLI.
 **Comment-only by default**: it never merges, and never approves/requests-changes
 unless a repo opts into "gate" mode (see Security posture) — a human makes the
-final call. Designed to run unattended on a Mac mini via `launchd`.
+final call. Designed to run unattended, on macOS via `launchd` or on Linux via a
+systemd timer.
 
 Not a product/library: there is no build, no dependencies to install. The only
 runtime requirements are `claude`, `gh`, `jq`, `git`, and (for the timeout
@@ -42,6 +43,8 @@ real value in a gitignored one.
 - `repos.conf.example` — template for the rotation target list (`repos.conf` is
   gitignored).
 - `com.pr-review-bot.plist.example` — launchd agent template.
+- `pr-review-bot.service.example`, `pr-review-bot.timer.example` — systemd
+  service + timer templates (tokens via `EnvironmentFile=`).
 - `README.md` — user-facing setup + usage.
 - (runtime) `$STATE_DIR/archive/<owner__repo>/pr<n>-<sha>-<ts>.md` — per-review
   debug session: decision, exact model input, raw output (incl. retries),
@@ -139,8 +142,9 @@ real value in a gitignored one.
   `sha=`), so PR content can't inject a base; and because a wrong base in gate mode
   could hide commits from an auto-APPROVE, **incremental gating requires `BOT_LOGIN`**
   (gate + unset BOT_LOGIN → full review).
-- **Tokens/secrets** live only in the launchd env; never log or post them. Use a
-  fine-grained `GH_TOKEN` scoped to the target repos, not classic `repo`.
+- **Tokens/secrets** live only in the launchd env or the systemd env file; never
+  log or post them. Use a fine-grained `GH_TOKEN` scoped to the target repos, not
+  classic `repo`. Deployment isolation: README § Shared host.
 
 ## Conventions
 

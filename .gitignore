@@ -2,6 +2,9 @@
 *.local
 # Never commit a rendered launchd plist — it holds live tokens in cleartext.
 com.pr-review-bot.plist
+# Nor rendered systemd units (they belong in /etc/systemd/system).
+pr-review-bot.service
+pr-review-bot.timer
 # Your actual target list (copy from repos.conf.example).
 repos.conf
 # Never commit env files that carry tokens (e.g. a github.env sourced by the wrapper).
