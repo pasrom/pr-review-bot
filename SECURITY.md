@@ -27,8 +27,11 @@ properties the code is designed to preserve (see `CLAUDE.md` for the full list):
   anchor-validated against the diff before posting; a trusted `BOT_LOGIN`
   hardens skip-marker dedup against spoofing.
 - **Secrets** (the GitHub token, the Claude credential) live only in the
-  launchd/env wrapper — never in the repo, never logged or posted. `.gitignore`
-  keeps the rendered plist, `repos.conf`, and `*.env` out of version control.
+  launchd/env wrapper or the systemd env file — never in the repo, never logged
+  or posted. `.gitignore` keeps the rendered plist, `repos.conf`, and `*.env` out
+  of version control.
+- **Isolation on a shared host** is a deployment duty: with CI runners on the
+  same machine, the bot needs its own user, see README § Shared host.
 
 If you find a way to make the bot merge, approve untrusted/fork code, exfiltrate
 its token, or act on injected instructions, that is in scope — please report it.

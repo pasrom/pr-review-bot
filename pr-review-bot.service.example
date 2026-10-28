@@ -1,0 +1,30 @@
+# systemd service for the headless PR pre-reviewer on Linux. Setup, placeholders
+# and the dry run: README.md § Schedule > Linux. Run it as a dedicated user
+# (README.md § Shared host).
+
+[Unit]
+Description=Headless PR pre-reviewer (claude -p)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=__BOT_USER__
+WorkingDirectory=__BOT_DIR__
+# claude, gh and git must be on PATH (the native claude installer uses ~/.local/bin).
+Environment=PATH=__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LANG=C.UTF-8
+# CLAUDE_CODE_OAUTH_TOKEN (or ANTHROPIC_API_KEY) and GH_TOKEN, optionally GH_REPO.
+# Read by systemd itself, so the file can stay root:root 0600.
+EnvironmentFile=/etc/pr-review-bot/pr-review-bot.env
+ExecStart=__BOT_DIR__/auto-review.sh
+# No TimeoutStartSec: a oneshot has no start timeout by default, like launchd, so
+# a tick with many open PRs is not cut off; CLAUDE_TIMEOUT bounds each call.
+# Hardening: writable only under the bot's home, and the default (rootful) docker
+# socket stays out of reach even if the user is later added to the docker group.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=__HOME__
+InaccessiblePaths=-/run/docker.sock
+UMask=0077

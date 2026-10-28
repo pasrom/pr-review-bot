@@ -1,0 +1,12 @@
+# systemd timer for pr-review-bot.service (see pr-review-bot.service.example).
+
+[Unit]
+Description=Run the headless PR pre-reviewer every 15 minutes
+
+[Timer]
+OnCalendar=*:00/15
+# Spread hosts and other quarter-hour timers apart.
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target
