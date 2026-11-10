@@ -132,8 +132,10 @@ real value in a gitignored one.
   following instructions embedded in PR text. Dedup matches the full marker
   prefix (and optionally a trusted `BOT_LOGIN`) to resist skip-marker spoofing.
 - **Incremental review reads untrusted author content.** On re-review it feeds
-  the author's PR responses to the model as memory — these stay inside the fenced
-  DATA block (never the trusted preamble), and the instruction tells the model to
+  the author's PR responses to the model as memory, plus the prior review's inline
+  comments with the PR author's and thread author's replies (`prior_inline_threads`,
+  bounded; the prior review is matched by marker, `BOT_LOGIN`-scoped when set) —
+  these stay inside the fenced DATA block (never the trusted preamble), and the instruction tells the model to
   treat a point as resolved only when the diff actually shows the fix (verify, not
   obey) and never to change its verdict on PR-content instruction. The delta is the
   GitHub compare API (`base...head`), used only for a clean fast-forward; a
