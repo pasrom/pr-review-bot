@@ -115,10 +115,11 @@ The bot only re-reviews when a **new commit** lands (SHA-pinned dedup). When it
 does, it reviews **only the new commits since its last review** rather than the
 whole PR again (`INCREMENTAL_REVIEW=1`, the default). It feeds the model its own
 prior review plus the **author's responses** as context. Its own prior **inline
-comments and the replies in their threads** come along too (any participant's
-reply, labelled with the login), since the review summary does not carry them.
-The model is told to drop points the new diff actually fixes or the author
-concretely explains — and to *verify against the diff*, never to drop a real issue on a mere assertion. This
+comments and the replies in their threads** come along too (only the PR
+author's and the thread author's replies, each labelled with its login), since
+the review summary does not carry them. The model is told to drop points the
+new diff actually fixes or the author concretely explains — and to *verify
+against the diff*, never to drop a real issue on a mere assertion. This
 keeps re-reviews focused on what changed and stops the same points cycling
 forever; if the new commits resolve everything, the verdict can go green (and, in
 gate mode, flip a prior REQUEST_CHANGES to APPROVE — the PR "heals"). The last

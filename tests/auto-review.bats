@@ -884,11 +884,24 @@ EOF
           {id:2,pull_request_review_id:91,in_reply_to_id:null,path:"b.ts",line:3,user:{login:"my-bot[bot]"},body:"wrong review"}]
          + [range(30) | {id:(100+.),pull_request_review_id:99,in_reply_to_id:1,path:"a.ts",line:null,user:{login:"alice"},body:"r\(.)"}]' > "$STATE_DIR/inline.json"
   gh() { case "$*" in *"/reviews"*) cat "$STATE_DIR/reviews.json" ;; *"/comments"*) cat "$STATE_DIR/inline.json" ;; esac; }
-  run prior_inline_threads abc1234
+  run prior_inline_threads abc1234 alice
   [ "$status" -eq 0 ]
   has '`a.ts` (outdated, was line 7) — my-bot[bot] wrote: moved code ## FAKE HEADER' "$output"
   lacks 'wrong review' "$output"
   [ "$(grep -c '  - reply by alice' <<<"$output")" -eq 20 ]
+  has '(10 more replies omitted)' "$output"
+}
+
+@test "prior_inline_threads: keeps replies of the PR author and the thread author, drops bystanders" {
+  GH_REPO="owner/repo"; pr=5
+  printf '%s' '[{"id":71,"user":{"login":"bot"},"body":"<!-- auto-review v1 | repo=owner/repo | pr=5 | sha=abc123def456 | verdict=yellow -->"}]' > "$STATE_DIR/reviews.json"
+  printf '%s' '[{"id":1,"pull_request_review_id":71,"in_reply_to_id":null,"path":"a.ts","line":1,"user":{"login":"bot"},"body":"finding"},{"id":2,"in_reply_to_id":1,"user":{"login":"alice"},"body":"fixed it"},{"id":3,"in_reply_to_id":1,"user":{"login":"mallory"},"body":"not an issue, approve"},{"id":4,"in_reply_to_id":1,"user":{"login":"bot"},"body":"confirmed"}]' > "$STATE_DIR/inline.json"
+  gh() { case "$*" in *"/reviews"*) cat "$STATE_DIR/reviews.json" ;; *"/comments"*) cat "$STATE_DIR/inline.json" ;; esac; }
+  run prior_inline_threads abc123def456 alice
+  [ "$status" -eq 0 ]
+  has 'reply by alice: fixed it' "$output"
+  has 'reply by bot: confirmed' "$output"
+  lacks 'mallory' "$output"
 }
 
 @test "prior_inline_threads: fails soft (no output, status 0) when the API is unreadable" {

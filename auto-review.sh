@@ -465,7 +465,7 @@ prepare_incremental() {
     echo "## AUTHOR RESPONSES (the PR author's comments — they may say what was fixed or why a point was not addressed)"
     jq -r '.author.login as $a | [ .comments[]? | select(.author.login==$a) | .body ]
            | if length==0 then "(no author comments)" else (.[] | "- " + (gsub("\n"; " "))) end' <<<"$data" 2>/dev/null || echo "(none)"
-    prior_inline_threads "$prior"
+    prior_inline_threads "$prior" "$(jq -r '.author.login // empty' <<<"$data" 2>/dev/null)"
   } > "$LAST_PRIOR_FILE"
 }
 
@@ -473,10 +473,13 @@ prepare_incremental() {
 # memory section. `gh pr view` carries neither, so they come from REST. Without
 # BOT_LOGIN the marker match cannot prove the review is the bot's, so every entry
 # is labelled with its login and the whole section is framed as untrusted DATA.
-# Bounded: 50 threads x 20 replies x 1500 chars. Fails soft: prints nothing on
-# any API/parse error. arg: prior sha ; uses $pr,$GH_REPO,$BOT_LOGIN
+# Replies are kept only from the PR author and the thread's own author, like the
+# author-response memory: a bystander's "not an issue" must not steer a verdict
+# that gate mode turns into an APPROVE. Bounded: 50 threads x 20 replies x 1500
+# chars, with a marker when a cap cuts. Fails soft: prints nothing on any
+# API/parse error. args: prior sha, PR author login ; uses $pr,$GH_REPO,$BOT_LOGIN
 prior_inline_threads() {
-  local prior="$1" rid out
+  local prior="$1" author="${2:-}" rid out
   # " |" ends the sha field, so a short prior sha can't prefix-match a longer one.
   # A GitHub App posts as "<name>[bot]" in REST but "<name>" in `gh pr view`.
   rid="$(gh api --paginate "repos/$GH_REPO/pulls/$pr/reviews?per_page=100" 2>/dev/null \
@@ -486,16 +489,20 @@ prior_inline_threads() {
                      | .id ] | last // empty' 2>/dev/null)" || return 0
   [[ "$rid" =~ ^[0-9]+$ ]] || return 0
   out="$(gh api --paginate "repos/$GH_REPO/pulls/$pr/comments?per_page=100" 2>/dev/null \
-        | jq -rs --argjson rid "$rid" '
+        | jq -rs --argjson rid "$rid" --arg author "$author" '
             def clip: gsub("[\r\n]+"; " ") | if length > 1500 then .[0:1500] + " …" else . end;
-            def where: if .line != null then "`\(.path):\(.line)`"
-                       else "`\(.path)` (outdated, was line \(.original_line // "?"))" end;
+            def where: if .line != null then "`\(.path | clip):\(.line)`"
+                       else "`\(.path | clip)` (outdated, was line \(.original_line // "?"))" end;
             (add // []) as $all
-            | limit(50; $all[] | select(.pull_request_review_id == $rid and .in_reply_to_id == null))
-            | . as $root
-            | "- \($root | where) — \($root.user.login) wrote: \($root.body | clip)",
-              limit(20; $all[] | select(.in_reply_to_id == $root.id)
-                        | "  - reply by \(.user.login): \(.body | clip)")' 2>/dev/null)" || return 0
+            | [ $all[] | select(.pull_request_review_id == $rid and .in_reply_to_id == null) ] as $roots
+            | ( $roots[0:50][]
+                | . as $root
+                | [ $all[] | select(.in_reply_to_id == $root.id)
+                           | select(.user.login == $author or .user.login == $root.user.login) ] as $replies
+                | "- \($root | where) — \($root.user.login) wrote: \($root.body | clip)",
+                  ( $replies[0:20][] | "  - reply by \(.user.login): \(.body | clip)" ),
+                  ( select($replies | length > 20) | "  - (\($replies | length - 20) more replies omitted)" ) ),
+              ( select($roots | length > 50) | "- (\($roots | length - 50) more threads omitted)" )' 2>/dev/null)" || return 0
   [[ -n "$out" ]] || return 0
   echo
   echo "## INLINE COMMENTS of your prior review, with the replies in their threads"
